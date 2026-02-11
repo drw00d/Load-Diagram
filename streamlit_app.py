@@ -1,5 +1,4 @@
 # streamlit_app.py
-import math
 import streamlit as st
 import pandas as pd
 import streamlit.components.v1 as components
@@ -10,6 +9,7 @@ st.title("Load Diagram Optimizer")
 MASTER_PATH = "data/Ortec SP Product Master.xlsx"
 
 # --- expected columns in your master ---
+COL_COMMODITY = "Product Type"      # <-- commodity filter
 COL_PRODUCT_ID = "Sales Product Id"
 COL_DESC = "Short Descrip"          # fallback to "Descrip" if needed
 COL_ACTIVE = "Active"
@@ -18,15 +18,12 @@ COL_UNIT_WT = "Unit Weight (lbs)"
 COL_HALF_PACK = "Half Pack"
 
 
-# =============================
-# Product Master
-# =============================
 @st.cache_data(show_spinner=False)
 def load_product_master(path: str) -> pd.DataFrame:
     df = pd.read_excel(path, engine="openpyxl")
     df.columns = [c.strip() for c in df.columns]
 
-    # Fallback: if Short Descrip doesn't exist, use Descrip
+    # Fallback for description column
     global COL_DESC
     if COL_DESC not in df.columns and "Descrip" in df.columns:
         COL_DESC = "Descrip"
@@ -36,13 +33,16 @@ def load_product_master(path: str) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Product Master missing required columns: {missing}")
 
-    # Clean
+    # Clean types
     df[COL_PRODUCT_ID] = df[COL_PRODUCT_ID].astype(str).str.strip()
     df[COL_UNIT_H] = pd.to_numeric(df[COL_UNIT_H], errors="coerce")
     df[COL_UNIT_WT] = pd.to_numeric(df[COL_UNIT_WT], errors="coerce")
 
     if COL_DESC in df.columns:
         df[COL_DESC] = df[COL_DESC].astype(str)
+
+    if COL_COMMODITY in df.columns:
+        df[COL_COMMODITY] = df[COL_COMMODITY].astype(str).str.strip()
 
     # Normalize Half Pack -> bool
     if COL_HALF_PACK in df.columns:
@@ -66,6 +66,7 @@ def lookup_product(df: pd.DataFrame, product_id: str) -> dict:
     r = row.iloc[0]
     return {
         "product_id": pid,
+        "commodity": r[COL_COMMODITY] if COL_COMMODITY in df.columns else "",
         "description": r[COL_DESC] if COL_DESC in df.columns else "",
         "unit_height_in": float(r[COL_UNIT_H]),
         "unit_weight_lbs": float(r[COL_UNIT_WT]),
@@ -73,16 +74,7 @@ def lookup_product(df: pd.DataFrame, product_id: str) -> dict:
     }
 
 
-# =============================
-# Spot Allocation (45 spots)
-# =============================
 def allocate_to_spots(mix: list[dict], spots: int, capacity_per_spot: int) -> list[list[dict]]:
-    """
-    Allocate product units into 'spots' with a simple capacity model.
-
-    Each spot can hold up to `capacity_per_spot` "units" (placeholder for tiers).
-    Returns: spot_contents[spot_index] = list of {"product_id", "qty"} placed in that spot.
-    """
     spot_contents: list[list[dict]] = [[] for _ in range(spots)]
     remaining = [{"product_id": m["product_id"], "qty": int(m["units"])} for m in mix]
 
@@ -94,21 +86,15 @@ def allocate_to_spots(mix: list[dict], spots: int, capacity_per_spot: int) -> li
             take = min(qty, capacity_per_spot)
             spot_contents[spot_i].append({"product_id": pid, "qty": take})
             qty -= take
-            # move to next spot if this spot is "full" (we treat single SKU fill as full)
-            # if you want mixing in a spot, remove this line.
             spot_i += 1
 
         if qty > 0:
-            # ran out of spots
             break
 
     return spot_contents
 
 
 def color_for_pid(pid: str) -> str:
-    """
-    Deterministic color from Product ID, so the same SKU always gets same fill color.
-    """
     palette = [
         "#d9ecff", "#ffe3d9", "#e6ffd9", "#f2e6ff", "#fff5cc",
         "#d9fff7", "#ffd9f1", "#e0e0ff", "#ffe0b2", "#d7ffd9",
@@ -119,9 +105,6 @@ def color_for_pid(pid: str) -> str:
     return palette[h % len(palette)]
 
 
-# =============================
-# SVG Renderer (15 x 3 = 45)
-# =============================
 def render_spot_grid_svg(
     *,
     car_id: str,
@@ -143,24 +126,21 @@ def render_spot_grid_svg(
     cell_w = grid_w / cols
     cell_h = grid_h / rows
 
-    # outer frame
     svg_parts = []
     svg_parts.append(f'<svg width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">')
     svg_parts.append(f'<rect x="{margin}" y="{margin}" width="{W-2*margin}" height="{H-2*margin}" fill="white" stroke="black" stroke-width="2"/>')
     svg_parts.append(f'<text x="{margin+8}" y="{margin+22}" font-size="18" font-weight="600">Car: {car_id} — Top View (Spots 1–45)</text>')
     svg_parts.append(f'<text x="{margin+8}" y="{margin+40}" font-size="13">{title_note}</text>')
 
-    # draw cells
     for r in range(rows):
         for c in range(cols):
-            idx = r * cols + c  # 0..44
-            spot_num = idx + 1  # 1..45
+            idx = r * cols + c
+            spot_num = idx + 1
             x = grid_x + c * cell_w
             y = grid_y + r * cell_h
 
             contents = spot_contents[idx] if idx < len(spot_contents) else []
 
-            # Fill logic
             if len(contents) == 0:
                 fill = "#ffffff"
                 label = ""
@@ -171,7 +151,6 @@ def render_spot_grid_svg(
                 fill = "#dddddd"
                 label = "MIX"
 
-            # tooltip
             tooltip = ""
             if contents:
                 tooltip_lines = [f'{x["product_id"]} x{x["qty"]}' for x in contents]
@@ -181,12 +160,9 @@ def render_spot_grid_svg(
             if tooltip:
                 svg_parts.append(f'<title>Spot {spot_num}: {tooltip}</title>')
 
-            # spot number
             svg_parts.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{spot_num}</text>')
 
-            # label (product)
             if label:
-                # wrap label into 2 lines if too long
                 if len(label) > 18:
                     line1 = label[:18]
                     line2 = label[18:]
@@ -199,9 +175,9 @@ def render_spot_grid_svg(
     return "\n".join(svg_parts)
 
 
-# =============================
-# App Start
-# =============================
+# -----------------------------
+# Load Product Master
+# -----------------------------
 try:
     pm = load_product_master(MASTER_PATH)
 except Exception as e:
@@ -211,9 +187,9 @@ except Exception as e:
 st.success(f"Product Master loaded: {len(pm):,} active rows")
 
 
-# =============================
+# -----------------------------
 # Sidebar Inputs
-# =============================
+# -----------------------------
 with st.sidebar:
     st.header("Car / Scenario")
     car_id = st.text_input("Car ID", value="TBOX632012")
@@ -227,29 +203,52 @@ with st.sidebar:
     st.caption("For now, each spot holds up to `tiers` units. We'll later tie this to unit height and car inside height.")
 
 
-# =============================
-# Product Mix Builder
-# =============================
+# -----------------------------
+# Commodity Filter + Product Picker
+# -----------------------------
 st.subheader("Product Mix (multiple products per car)")
 
-search = st.text_input("Search (by Product Id or Short Descrip)", value="")
+# Commodity dropdown (Product Type)
+if COL_COMMODITY in pm.columns:
+    commodity_list = sorted(pm[COL_COMMODITY].dropna().astype(str).unique().tolist())
+    commodity_selected = st.selectbox("Commodity / Product Type", ["(Select)"] + commodity_list)
+else:
+    commodity_selected = "(Select)"
+    st.warning("Column 'Product Type' not found. Commodity filter disabled.")
 
-pm_view = pm.copy()
+# If user changes commodity, optionally clear mix to prevent accidental mixing
+if "selected_commodity" not in st.session_state:
+    st.session_state.selected_commodity = commodity_selected
+
+if commodity_selected != st.session_state.selected_commodity:
+    # commodity changed
+    if st.session_state.get("mix") and len(st.session_state.mix) > 0:
+        st.warning("Commodity changed — clearing mix to prevent OSB/PLY mixing.")
+        st.session_state.mix = []
+    st.session_state.selected_commodity = commodity_selected
+
+# Filter master by commodity selection
+pm_filtered = pm.copy()
+if commodity_selected != "(Select)" and COL_COMMODITY in pm_filtered.columns:
+    pm_filtered = pm_filtered[pm_filtered[COL_COMMODITY].astype(str) == str(commodity_selected)].copy()
+
+# Search within commodity
+search = st.text_input("Search (by Product Id or Description)", value="")
+
 if search.strip():
     s = search.strip().lower()
-    pm_view = pm_view[
-        pm_view[COL_PRODUCT_ID].astype(str).str.lower().str.contains(s)
-        | (pm_view[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_view.columns else False)
+    pm_filtered = pm_filtered[
+        pm_filtered[COL_PRODUCT_ID].astype(str).str.lower().str.contains(s)
+        | (pm_filtered[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_filtered.columns else False)
     ].copy()
 
-# limit options for speed
-pm_view = pm_view.head(5000)
+pm_filtered = pm_filtered.head(5000)
 
 def label_row(r):
-    desc = r[COL_DESC] if COL_DESC in pm_view.columns else ""
+    desc = r[COL_DESC] if COL_DESC in pm_filtered.columns else ""
     return f"{r[COL_PRODUCT_ID]} — {desc}" if desc else str(r[COL_PRODUCT_ID])
 
-options = pm_view.to_dict("records")
+options = pm_filtered.to_dict("records")
 labels = [label_row(r) for r in options]
 selected_label = st.selectbox("Pick a Product", labels) if labels else None
 
@@ -273,37 +272,44 @@ if add_btn and selected_label:
     prod = lookup_product(pm, pid)
     prod["units"] = int(units_to_add)
 
-    # If already in mix, increment units
-    found = False
-    for m in st.session_state.mix:
-        if m["product_id"] == prod["product_id"]:
-            m["units"] += prod["units"]
-            found = True
-            break
-    if not found:
+    # Guardrail: enforce same commodity in mix
+    if st.session_state.mix:
+        existing_commodity = st.session_state.mix[0].get("commodity", "")
+        if prod.get("commodity", "") != existing_commodity:
+            st.error(f"Cannot mix commodities: existing mix is '{existing_commodity}', selected is '{prod.get('commodity','')}'.")
+        else:
+            # add/increment
+            found = False
+            for m in st.session_state.mix:
+                if m["product_id"] == prod["product_id"]:
+                    m["units"] += prod["units"]
+                    found = True
+                    break
+            if not found:
+                st.session_state.mix.append(prod)
+    else:
         st.session_state.mix.append(prod)
 
-
-# =============================
+# -----------------------------
 # Mix Summary + Checks
-# =============================
+# -----------------------------
 if not st.session_state.mix:
     st.info("Add at least one product to the mix.")
-    mix_df = None
 else:
     mix_df = pd.DataFrame(st.session_state.mix)
-    mix_df = mix_df[["product_id", "description", "half_pack", "unit_height_in", "unit_weight_lbs", "units"]]
+    mix_df = mix_df[["commodity", "product_id", "description", "half_pack", "unit_height_in", "unit_weight_lbs", "units"]]
     st.dataframe(mix_df, use_container_width=True)
 
     total_units = int(mix_df["units"].sum())
     total_weight = float((mix_df["units"] * mix_df["unit_weight_lbs"]).sum())
     half_units = int(mix_df.loc[mix_df["half_pack"] == True, "units"].sum())
+    commodity_in_mix = mix_df["commodity"].iloc[0] if "commodity" in mix_df.columns else ""
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total Units", f"{total_units:,}")
-    k2.metric("Total Weight (lbs)", f"{total_weight:,.0f}")
-    k3.metric("Half-Pack Units", f"{half_units:,}")
-    k4.metric("Scenario", scenario)
+    k1.metric("Commodity", str(commodity_in_mix))
+    k2.metric("Total Units", f"{total_units:,}")
+    k3.metric("Total Weight (lbs)", f"{total_weight:,.0f}")
+    k4.metric("Half-Pack Units", f"{half_units:,}")
 
     if scenario == "RTD_SHTG" and (half_units % 2 != 0):
         st.warning(f"RTD_SHTG preview rule: Half-Pack units must be EVEN. Half-pack units = {half_units} (ODD).")
@@ -312,21 +318,21 @@ else:
         st.error(f"Total weight exceeds car max load: {total_weight:,.0f} > {max_load_lbs:,.0f} lbs")
 
 
-# =============================
+# -----------------------------
 # Top View: 45 Spot Grid + Labels
-# =============================
+# -----------------------------
 st.subheader("Top View — Spot Grid (1–45)")
 
 COLS = 15
 ROWS = 3
-SPOTS = COLS * ROWS  # 45
+SPOTS = COLS * ROWS
 
 if st.session_state.mix:
     spot_contents = allocate_to_spots(st.session_state.mix, spots=SPOTS, capacity_per_spot=int(tiers_capacity))
-    title_note = f"Capacity per spot: {tiers_capacity} | Spots: {SPOTS} (15x3)"
+    title_note = f"Commodity: {st.session_state.mix[0].get('commodity','')} | Capacity per spot: {tiers_capacity} | Spots: {SPOTS} (15x3)"
 else:
     spot_contents = [[] for _ in range(SPOTS)]
-    title_note = f"Capacity per spot: {tiers_capacity} | Add products to populate spots."
+    title_note = f"Pick a Commodity, add products, and the spots will populate."
 
 svg = render_spot_grid_svg(
     car_id=car_id,
