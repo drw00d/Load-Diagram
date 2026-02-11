@@ -78,11 +78,45 @@ def lookup_product(df: pd.DataFrame, product_id: str) -> dict:
         "unit_height_in": float(r[COL_UNIT_H]),
         "unit_weight_lbs": float(r[COL_UNIT_WT]),
         "half_pack": bool(r[COL_HALF_PACK]) if COL_HALF_PACK in df.columns else False,
+        "thickness": float(r[COL_THICK]) if COL_THICK in df.columns and pd.notna(r[COL_THICK]) else None,
+        "width": float(r[COL_WIDTH]) if COL_WIDTH in df.columns and pd.notna(r[COL_WIDTH]) else None,
+        "length": float(r[COL_LENGTH]) if COL_LENGTH in df.columns and pd.notna(r[COL_LENGTH]) else None,
     }
 
 
 # =============================
-# Allocation + Colors
+# Allocation (15 floor spots)
+# =============================
+def allocate_to_floor_spots(mix: list[dict], floor_spots: int, max_tiers: int) -> list[dict]:
+    """
+    Create a 1x15 plan: each spot is a vertical stack.
+    We fill spot 1..15 in order. A spot can hold up to max_tiers tiers.
+
+    Returns list length=floor_spots of:
+      {"spot": i, "product_id": str|None, "tiers": int, "unit_height_in": float}
+    """
+    plan = [{"spot": i + 1, "product_id": None, "tiers": 0, "unit_height_in": 0.0} for i in range(floor_spots)]
+    spot_i = 0
+
+    for m in mix:
+        pid = m["product_id"]
+        remaining = int(m["units"])
+        uh = float(m["unit_height_in"])
+
+        while remaining > 0 and spot_i < floor_spots:
+            take = min(remaining, max_tiers)
+            plan[spot_i] = {"spot": spot_i + 1, "product_id": pid, "tiers": take, "unit_height_in": uh}
+            remaining -= take
+            spot_i += 1
+
+        if remaining > 0:
+            break
+
+    return plan
+
+
+# =============================
+# SVG Helpers
 # =============================
 def color_for_pid(pid: str) -> str:
     palette = [
@@ -95,156 +129,112 @@ def color_for_pid(pid: str) -> str:
     return palette[h % len(palette)]
 
 
-def allocate_to_spots(mix: list[dict], spots: int, tiers_capacity: int) -> list[list[dict]]:
+def render_top_1x15_svg(car_id: str, plan: list[dict], note: str) -> str:
     """
-    Each spot holds up to tiers_capacity "units" stacked vertically.
-    Returns spot_contents[spot_index] = list of {"product_id","qty"} in that spot.
+    1 row, 15 columns (like Load Xpert top view for 1-wide loads).
     """
-    spot_contents: list[list[dict]] = [[] for _ in range(spots)]
-    spot_i = 0
-
-    for m in mix:
-        pid = m["product_id"]
-        qty = int(m["units"])
-        while qty > 0 and spot_i < spots:
-            take = min(qty, tiers_capacity)
-            spot_contents[spot_i].append({"product_id": pid, "qty": take})
-            qty -= take
-            spot_i += 1
-        if qty > 0:
-            break
-
-    return spot_contents
-
-
-# =============================
-# Renderers
-# =============================
-def render_top_grid_svg(car_id: str, cols: int, rows: int, spot_contents: list[list[dict]], note: str) -> str:
-    W, H = 1200, 420
-    margin, header_h = 30, 45
-    grid_x, grid_y = margin, margin + header_h
-    grid_w, grid_h = W - 2 * margin, H - grid_y - margin
-    cell_w, cell_h = grid_w / cols, grid_h / rows
+    cols = len(plan)
+    W, H = 1200, 220
+    margin = 30
+    header_h = 55
+    x0, y0 = margin, margin + header_h
+    w = W - 2 * margin
+    h = H - y0 - margin
+    cell_w = w / cols
 
     svg = []
     svg.append(f'<svg width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">')
     svg.append(f'<rect x="{margin}" y="{margin}" width="{W-2*margin}" height="{H-2*margin}" fill="white" stroke="black" stroke-width="2"/>')
-    svg.append(f'<text x="{margin+8}" y="{margin+22}" font-size="18" font-weight="600">Car: {car_id} — Top View</text>')
-    svg.append(f'<text x="{margin+8}" y="{margin+40}" font-size="13">{note}</text>')
+    svg.append(f'<text x="{margin+8}" y="{margin+22}" font-size="18" font-weight="600">Car: {car_id} — Top View (15 floor spots)</text>')
+    svg.append(f'<text x="{margin+8}" y="{margin+42}" font-size="13">{note}</text>')
 
-    for r in range(rows):
-        for c in range(cols):
-            idx = r * cols + c
-            spot_num = idx + 1
-            x = grid_x + c * cell_w
-            y = grid_y + r * cell_h
-            contents = spot_contents[idx] if idx < len(spot_contents) else []
+    # draw 15 boxes
+    for i, s in enumerate(plan):
+        x = x0 + i * cell_w
+        y = y0
+        pid = s["product_id"]
+        tiers = s["tiers"]
 
-            if len(contents) == 0:
-                fill, label = "#ffffff", ""
-            elif len(contents) == 1:
-                fill = color_for_pid(contents[0]["product_id"])
-                label = f'{contents[0]["product_id"]} x{contents[0]["qty"]}'
-            else:
-                fill, label = "#dddddd", "MIX"
+        if not pid:
+            fill = "#ffffff"
+            label = ""
+        else:
+            fill = color_for_pid(pid)
+            label = f"{pid} x{tiers}"
 
-            tooltip = ""
-            if contents:
-                tooltip = " | ".join([f'{x["product_id"]} x{x["qty"]}' for x in contents])
+        svg.append(f'<rect x="{x}" y="{y}" width="{cell_w}" height="{h}" fill="{fill}" stroke="#333" stroke-width="1"/>')
+        svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{s["spot"]}</text>')
 
-            svg.append(f'<rect x="{x}" y="{y}" width="{cell_w}" height="{cell_h}" fill="{fill}" stroke="#333" stroke-width="1"/>')
-            if tooltip:
-                svg.append(f'<title>Spot {spot_num}: {tooltip}</title>')
-
-            svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{spot_num}</text>')
-            if label:
-                svg.append(f'<text x="{x+6}" y="{y+42}" font-size="12" fill="#000">{label[:28]}</text>')
+        if label:
+            svg.append(f'<text x="{x+6}" y="{y+44}" font-size="12" fill="#000">{label}</text>')
 
     svg.append("</svg>")
     return "\n".join(svg)
 
 
-def build_stack_profile(spot_contents: list[list[dict]], product_lookup: dict) -> list[dict]:
+def render_side_1x15_svg(car_id: str, plan: list[dict], side_name: str, car_inside_height_in: float) -> str:
     """
-    Convert spot_contents into stack profiles including computed height inches.
-    product_lookup: {product_id: {"unit_height_in":...}}
-    Returns list of stacks for spots 1..N with:
-      {"spot": int, "height_in": float, "label": str, "fill": str}
+    Side view: 15 stacks across.
+    Bar height = tiers * unit_height_in, scaled to inside height.
     """
-    stacks = []
-    for i, contents in enumerate(spot_contents):
-        spot = i + 1
-        if not contents:
-            stacks.append({"spot": spot, "height_in": 0.0, "label": "", "fill": "#ffffff"})
-            continue
-
-        # single SKU per spot in current allocator
-        if len(contents) == 1:
-            pid = contents[0]["product_id"]
-            qty = contents[0]["qty"]
-            uh = float(product_lookup.get(pid, {}).get("unit_height_in", 0.0))
-            h = qty * uh
-            stacks.append({"spot": spot, "height_in": h, "label": f"{pid} x{qty}", "fill": color_for_pid(pid)})
-        else:
-            # mixed
-            h = 0.0
-            parts = []
-            for item in contents:
-                pid, qty = item["product_id"], item["qty"]
-                uh = float(product_lookup.get(pid, {}).get("unit_height_in", 0.0))
-                h += qty * uh
-                parts.append(f"{pid}x{qty}")
-            stacks.append({"spot": spot, "height_in": h, "label": "MIX", "fill": "#dddddd"})
-    return stacks
-
-
-def render_side_svg(car_id: str, stacks: list[dict], side_name: str, car_inside_height_in: float) -> str:
-    """
-    Side view: each spot is a vertical bar scaled by height_in.
-    We render 15 spots across (matches top-view columns).
-    """
-    cols = 15
+    cols = len(plan)
     W, H = 1200, 320
     margin = 30
-    header_h = 35
+    header_h = 40
+
     x0, y0 = margin, margin + header_h
-    plot_w, plot_h = W - 2 * margin, H - y0 - margin
+    plot_w = W - 2 * margin
+    plot_h = H - y0 - margin
     cell_w = plot_w / cols
+    base_y = y0 + plot_h
+
+    # max stack height (inches)
+    max_stack_in = 0.0
+    for s in plan:
+        if s["product_id"]:
+            max_stack_in = max(max_stack_in, float(s["tiers"]) * float(s["unit_height_in"]))
+
+    ref_h = max(car_inside_height_in, max_stack_in, 1.0)
+    scale = plot_h / ref_h
 
     svg = []
     svg.append(f'<svg width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">')
     svg.append(f'<rect x="{margin}" y="{margin}" width="{W-2*margin}" height="{H-2*margin}" fill="white" stroke="black" stroke-width="2"/>')
-    svg.append(f'<text x="{margin+8}" y="{margin+22}" font-size="16" font-weight="600">Car: {car_id} — {side_name}</text>')
+    svg.append(f'<text x="{margin+8}" y="{margin+24}" font-size="16" font-weight="600">Car: {car_id} — {side_name}</text>')
 
-    # reference line: car inside height
-    svg.append(f'<line x1="{x0}" y1="{y0}" x2="{x0+plot_w}" y2="{y0}" stroke="#999" stroke-width="1"/>')
-    svg.append(f'<text x="{x0+4}" y="{y0-6}" font-size="12" fill="#666">Top (ref)</text>')
-
-    # bars from bottom
-    base_y = y0 + plot_h
+    # base line
     svg.append(f'<line x1="{x0}" y1="{base_y}" x2="{x0+plot_w}" y2="{base_y}" stroke="#000" stroke-width="1"/>')
+    # top ref line
+    top_ref_y = base_y - car_inside_height_in * scale
+    svg.append(f'<line x1="{x0}" y1="{top_ref_y}" x2="{x0+plot_w}" y2="{top_ref_y}" stroke="#999" stroke-width="1" />')
+    svg.append(f'<text x="{x0+4}" y="{top_ref_y-6}" font-size="12" fill="#666">Inside height ref</text>')
 
-    # scale factor
-    max_h = max(car_inside_height_in, max([s["height_in"] for s in stacks] + [0.0]))
-    scale = plot_h / max_h if max_h > 0 else 1.0
-
-    # only first 15 stacks for a single side span (we map 1..15; later we’ll map full length)
-    # For now: show spots 1–15 as an example side section. Next iteration: map all 45 along length.
-    view_stacks = stacks[:cols]
-
-    for i, s in enumerate(view_stacks):
-        bar_h = s["height_in"] * scale
+    for i, s in enumerate(plan):
         x = x0 + i * cell_w + 2
-        y = base_y - bar_h
         w = cell_w - 4
-        fill = s["fill"]
 
+        pid = s["product_id"]
+        tiers = s["tiers"]
+        uh = s["unit_height_in"]
+
+        if not pid:
+            bar_h = 0
+            fill = "#ffffff"
+            label = ""
+        else:
+            bar_h = float(tiers) * float(uh) * scale
+            fill = color_for_pid(pid)
+            label = f"{pid} x{tiers}"
+
+        y = base_y - bar_h
         svg.append(f'<rect x="{x}" y="{y}" width="{w}" height="{bar_h}" fill="{fill}" stroke="#333" stroke-width="1"/>')
+
+        # spot number
         svg.append(f'<text x="{x+3}" y="{base_y+14}" font-size="11" fill="#333">{s["spot"]}</text>')
 
-        if s["label"]:
-            svg.append(f'<text x="{x+3}" y="{y+14}" font-size="11" fill="#000">{s["label"][:12]}</text>')
+        # label near top of bar
+        if label:
+            svg.append(f'<text x="{x+3}" y="{y+14}" font-size="11" fill="#000">{label[:16]}</text>')
 
     svg.append("</svg>")
     return "\n".join(svg)
@@ -259,21 +249,19 @@ except Exception as e:
     st.error(f"Could not load Product Master at '{MASTER_PATH}'. Error: {e}")
     st.stop()
 
-# Sidebar controls
 with st.sidebar:
     st.header("Settings")
     car_id = st.text_input("Car ID", value="TBOX632012")
     scenario = st.selectbox("Scenario", ["RTD_SHTG", "BC", "SIDING"], index=0)
-    tiers_capacity = st.slider("Tiers capacity per spot", 1, 12, 7)
+    max_tiers = st.slider("Max tiers per spot (stack height)", 1, 6, 4)  # <-- you said 3 or 4
+    car_inside_height_in = st.number_input("Inside height ref (in)", min_value=60.0, value=110.0, step=1.0)
 
     st.divider()
-    st.header("View")
     view_mode = st.radio("Diagram view", ["Top + Both Sides", "Top only", "Sides only"], index=0)
-    car_inside_height_in = st.number_input("Car inside height (in) (ref line)", min_value=60.0, value=110.0, step=1.0)
 
 st.success(f"Product Master loaded: {len(pm):,} rows")
 
-# Commodity primary filter
+# Commodity is primary filter
 commodities = sorted(pm[COL_COMMODITY].dropna().astype(str).unique().tolist())
 commodity_selected = st.selectbox("Commodity / Product Type (required)", ["(Select)"] + commodities)
 
@@ -284,10 +272,10 @@ if "selected_commodity" not in st.session_state:
 if "selected_facility" not in st.session_state:
     st.session_state.selected_facility = "(All facilities)"
 
-# If commodity changes, clear mix
+# clear mix if commodity changes
 if commodity_selected != st.session_state.selected_commodity:
     if st.session_state.mix:
-        st.warning("Commodity changed — clearing mix to prevent mixing.")
+        st.warning("Commodity changed — clearing mix.")
         st.session_state.mix = []
     st.session_state.selected_commodity = commodity_selected
     st.session_state.selected_facility = "(All facilities)"
@@ -298,13 +286,13 @@ if commodity_selected == "(Select)":
 
 pm_c = pm[pm[COL_COMMODITY].astype(str) == str(commodity_selected)].copy()
 
-# Facility filtered by commodity
+# Facility list filtered by commodity
 facilities = sorted(pm_c[COL_FACILITY].dropna().astype(str).unique().tolist()) if COL_FACILITY in pm_c.columns else []
 facility_selected = st.selectbox("Facility Id (filtered by commodity)", ["(All facilities)"] + facilities)
 
 if facility_selected != st.session_state.selected_facility:
     if st.session_state.mix:
-        st.warning("Facility changed — clearing mix to prevent cross-facility mixing.")
+        st.warning("Facility changed — clearing mix.")
         st.session_state.mix = []
     st.session_state.selected_facility = facility_selected
 
@@ -312,7 +300,7 @@ pm_cf = pm_c.copy()
 if facility_selected != "(All facilities)" and COL_FACILITY in pm_cf.columns:
     pm_cf = pm_cf[pm_cf[COL_FACILITY].astype(str) == str(facility_selected)].copy()
 
-# Search + sort + dedupe for picker
+# Search
 search = st.text_input("Search (by Product Id or Description)", value="")
 if search.strip():
     s = search.strip().lower()
@@ -321,6 +309,7 @@ if search.strip():
         | (pm_cf[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_cf.columns else False)
     ].copy()
 
+# Sort by thickness/size (best first), then dedupe
 sort_cols, ascending = [], []
 if COL_THICK in pm_cf.columns:
     sort_cols.append(COL_THICK); ascending.append(False)
@@ -354,7 +343,7 @@ selected_label = st.selectbox("Pick a Product", labels) if labels else None
 
 c1, c2, c3 = st.columns([2, 1, 1], vertical_alignment="bottom")
 with c1:
-    units_to_add = st.number_input("Units to add", min_value=1, value=10, step=1)
+    units_to_add = st.number_input("Units to add (total packs)", min_value=1, value=10, step=1)
 with c2:
     add_btn = st.button("Add to Mix", disabled=(selected_label is None))
 with c3:
@@ -369,7 +358,7 @@ if add_btn and selected_label:
     prod = lookup_product(pm, pid)
     prod["units"] = int(units_to_add)
 
-    # increment if already exists
+    # increment if exists
     for m in st.session_state.mix:
         if m["product_id"] == prod["product_id"]:
             m["units"] += prod["units"]
@@ -377,44 +366,37 @@ if add_btn and selected_label:
     else:
         st.session_state.mix.append(prod)
 
-# Mix summary
-if not st.session_state.mix:
-    st.info("Add at least one product to the mix.")
-else:
+# Mix table
+if st.session_state.mix:
     mix_df = pd.DataFrame(st.session_state.mix)
     mix_df = mix_df[["facility_id", "commodity", "product_id", "description", "unit_height_in", "unit_weight_lbs", "units"]]
     st.dataframe(mix_df, use_container_width=True)
-
-# Build diagram inputs
-COLS, ROWS = 15, 3
-SPOTS = COLS * ROWS
-
-spot_contents = allocate_to_spots(st.session_state.mix, spots=SPOTS, tiers_capacity=int(tiers_capacity)) if st.session_state.mix else [[] for _ in range(SPOTS)]
-product_lookup = {m["product_id"]: m for m in st.session_state.mix}
-stacks = build_stack_profile(spot_contents, product_lookup)
-
-note = f"Commodity: {commodity_selected} | Facility: {facility_selected} | Spots: {SPOTS} (15x3) | Tiers cap: {tiers_capacity}"
-
-# Layout
-if view_mode == "Top only":
-    components.html(render_top_grid_svg(car_id, COLS, ROWS, spot_contents, note), height=460, scrolling=False)
-
-elif view_mode == "Sides only":
-    colA, colB = st.columns(2)
-    with colA:
-        components.html(render_side_svg(car_id, stacks, "Side A", car_inside_height_in), height=340, scrolling=False)
-    with colB:
-        # For now we mirror the same stack set; next iteration we’ll map true opposite-side / length
-        components.html(render_side_svg(car_id, stacks, "Side B", car_inside_height_in), height=340, scrolling=False)
-
 else:
-    top = render_top_grid_svg(car_id, COLS, ROWS, spot_contents, note)
-    sideA = render_side_svg(car_id, stacks, "Side A", car_inside_height_in)
-    sideB = render_side_svg(car_id, stacks, "Side B", car_inside_height_in)
+    st.info("Add at least one product to the mix.")
 
-    components.html(top, height=460, scrolling=False)
-    cA, cB = st.columns(2)
-    with cA:
-        components.html(sideA, height=340, scrolling=False)
-    with cB:
-        components.html(sideB, height=340, scrolling=False)
+# Build 15-spot plan
+FLOOR_SPOTS = 15
+plan = allocate_to_floor_spots(st.session_state.mix, floor_spots=FLOOR_SPOTS, max_tiers=int(max_tiers)) if st.session_state.mix else allocate_to_floor_spots([], FLOOR_SPOTS, int(max_tiers))
+
+note = f"Commodity: {commodity_selected} | Facility: {facility_selected} | Floor spots: {FLOOR_SPOTS} | Max tiers: {max_tiers}"
+
+# Render
+top_svg = render_top_1x15_svg(car_id, plan, note)
+sideA_svg = render_side_1x15_svg(car_id, plan, "Side A", car_inside_height_in)
+sideB_svg = render_side_1x15_svg(car_id, plan, "Side B", car_inside_height_in)
+
+if view_mode == "Top only":
+    components.html(top_svg, height=240, scrolling=False)
+elif view_mode == "Sides only":
+    ca, cb = st.columns(2)
+    with ca:
+        components.html(sideA_svg, height=340, scrolling=False)
+    with cb:
+        components.html(sideB_svg, height=340, scrolling=False)
+else:
+    components.html(top_svg, height=240, scrolling=False)
+    ca, cb = st.columns(2)
+    with ca:
+        components.html(sideA_svg, height=340, scrolling=False)
+    with cb:
+        components.html(sideB_svg, height=340, scrolling=False)
