@@ -9,19 +9,24 @@ st.title("Load Diagram Optimizer")
 MASTER_PATH = "data/Ortec SP Product Master.xlsx"
 
 # --- Product Master columns ---
-COL_COMMODITY = "Product Type"      # primary filter
+COL_COMMODITY = "Product Type"
 COL_FACILITY = "Facility Id"
 COL_PRODUCT_ID = "Sales Product Id"
-COL_DESC = "Short Descrip"          # fallback to "Descrip"
+COL_DESC = "Short Descrip"
 COL_ACTIVE = "Active"
 COL_UNIT_H = "Unit Height (In)"
 COL_UNIT_WT = "Unit Weight (lbs)"
 COL_HALF_PACK = "Half Pack"
 
-# sorting / size fields
 COL_THICK = "Panel Thickness"
 COL_WIDTH = "Width"
 COL_LENGTH = "Length"
+
+# --- Diagram constants for this car family (your standard) ---
+FLOOR_SPOTS = 15
+DOOR_START_SPOT = 6  # doorway spans 6th spot through 9th spot
+DOOR_END_SPOT = 9
+AIRBAG_ALLOWED_GAPS = [(6, 7), (7, 8), (8, 9)]  # can move 1 spot from typical 7-8
 
 
 # =============================
@@ -73,25 +78,18 @@ def lookup_product(df: pd.DataFrame, product_id: str) -> dict:
     r = row.iloc[0]
     return {
         "product_id": pid,
-        "commodity": r[COL_COMMODITY] if COL_COMMODITY in df.columns else "",
+        "commodity": r[COL_COMMODITY],
         "facility_id": r[COL_FACILITY] if COL_FACILITY in df.columns else "",
         "description": r[COL_DESC] if COL_DESC in df.columns else "",
         "unit_height_in": float(r[COL_UNIT_H]),
         "unit_weight_lbs": float(r[COL_UNIT_WT]),
         "half_pack": bool(r[COL_HALF_PACK]) if COL_HALF_PACK in df.columns else False,
-        "thickness": float(r[COL_THICK]) if COL_THICK in df.columns and pd.notna(r[COL_THICK]) else None,
-        "width": float(r[COL_WIDTH]) if COL_WIDTH in df.columns and pd.notna(r[COL_WIDTH]) else None,
-        "length": float(r[COL_LENGTH]) if COL_LENGTH in df.columns and pd.notna(r[COL_LENGTH]) else None,
     }
 
 
 # =============================
-# Plan model: 15 floor spots, each spot holds up to max_tiers.
-# Each spot has a list of layers: [{"product_id": str, "tiers": int}]
+# Plan model: 15 spots; each spot holds layers: [{"product_id": str, "tiers": int}]
 # =============================
-FLOOR_SPOTS = 15
-
-
 def init_plan() -> list[list[dict]]:
     return [[] for _ in range(FLOOR_SPOTS)]
 
@@ -101,10 +99,6 @@ def spot_tiers(spot_layers: list[dict]) -> int:
 
 
 def add_layers_to_plan(plan: list[list[dict]], product_id: str, tiers_to_add: int, max_tiers: int) -> None:
-    """
-    Fill tiers across spots left->right.
-    Allows mixing SKUs inside the same spot by tiers.
-    """
     remaining = int(tiers_to_add)
     if remaining <= 0:
         return
@@ -120,7 +114,6 @@ def add_layers_to_plan(plan: list[list[dict]], product_id: str, tiers_to_add: in
 
         take = min(remaining, capacity)
 
-        # if SKU already exists in this spot, increment tiers; else append new layer
         for layer in plan[i]:
             if layer["product_id"] == product_id:
                 layer["tiers"] += take
@@ -156,73 +149,96 @@ def plan_payload_lbs(plan: list[list[dict]], product_lookup: dict) -> float:
     return total
 
 
-def render_top_svg_1x15(
+def doorway_bounds_px(x0: float, cell_w: float) -> tuple[float, float]:
+    # doorway spans spots 6..9, so left edge at start of spot 6 and right edge at end of spot 9
+    left = x0 + (DOOR_START_SPOT - 1) * cell_w
+    right = x0 + (DOOR_END_SPOT) * cell_w
+    return left, right
+
+
+def airbag_gap_center_px(x0: float, cell_w: float, gap_choice: tuple[int, int]) -> float:
+    # gap between a and b => boundary at end of a
+    a, b = gap_choice
+    boundary_x = x0 + a * cell_w
+    return boundary_x
+
+
+def render_top_svg(
     *,
     car_id: str,
     plan: list[list[dict]],
     note: str,
-    airbag_between_spots: int,     # 1..14 means between spot k and k+1
-    airbag_gap_in: float,          # 6..9
-    unit_length_ref_in: float,     # used to scale airbag width vs spot
+    airbag_gap_in: float,
+    airbag_gap_choice: tuple[int, int],
+    unit_length_ref_in: float,
 ) -> str:
     cols = FLOOR_SPOTS
-    W, H = 1200, 240
+    W, H = 1200, 260
     margin = 30
-    header_h = 60
+    header_h = 70
 
     x0, y0 = margin, margin + header_h
     w = W - 2 * margin
     h = H - y0 - margin
     cell_w = w / cols
 
+    # Scale airbag inches to visible band width using unit length reference
+    frac = 0.0 if unit_length_ref_in <= 0 else (float(airbag_gap_in) / float(unit_length_ref_in))
+    band_w = max(8.0, min(cell_w * 0.9, cell_w * frac))
+
     svg = []
     svg.append(f'<svg width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">')
+
+    # defs: hatch pattern for doorway
+    svg.append("""
+    <defs>
+      <pattern id="doorHatch" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="8" stroke="#c00000" stroke-width="2" opacity="0.35"/>
+      </pattern>
+    </defs>
+    """)
+
     svg.append(f'<rect x="{margin}" y="{margin}" width="{W-2*margin}" height="{H-2*margin}" fill="white" stroke="black" stroke-width="2"/>')
-    svg.append(f'<text x="{margin+8}" y="{margin+24}" font-size="18" font-weight="600">Car: {car_id} — Top View (15 floor spots)</text>')
-    svg.append(f'<text x="{margin+8}" y="{margin+46}" font-size="13">{note}</text>')
+    svg.append(f'<text x="{margin+8}" y="{margin+26}" font-size="18" font-weight="600">Car: {car_id} — Top View (15 floor spots)</text>')
+    svg.append(f'<text x="{margin+8}" y="{margin+50}" font-size="13">{note}</text>')
 
-    # Airbag / Door gap band (red) between k and k+1
-    # scale gap inches to a fraction of a spot width using unit_length_ref_in
-    frac = 0.0 if unit_length_ref_in <= 0 else (float(airbag_gap_in) / float(unit_length_ref_in))
-    band_w = max(6.0, min(cell_w * 0.9, cell_w * frac))  # clamp so it's visible but not insane
-    k = int(airbag_between_spots)
-    k = max(1, min(14, k))
-    boundary_x = x0 + k * cell_w
-    band_x = boundary_x - band_w / 2
+    # doorway overlay
+    door_left, door_right = doorway_bounds_px(x0, cell_w)
+    svg.append(f'<rect x="{door_left}" y="{y0}" width="{door_right-door_left}" height="{h}" fill="url(#doorHatch)" stroke="#c00000" stroke-width="3" opacity="0.9"/>')
+    svg.append(f'<text x="{door_left+6}" y="{y0-10}" font-size="12" fill="#c00000">Doorway zone (Spots {DOOR_START_SPOT}–{DOOR_END_SPOT})</text>')
 
-    svg.append(f'<rect x="{band_x}" y="{y0}" width="{band_w}" height="{h}" fill="none" stroke="#d00000" stroke-width="4"/>')
-    svg.append(f'<text x="{band_x+4}" y="{y0-8}" font-size="12" fill="#d00000">Airbag gap {airbag_gap_in:.1f}"</text>')
+    # airbag gap band (red) at selected boundary, only allowed in doorway zone
+    center_x = airbag_gap_center_px(x0, cell_w, airbag_gap_choice)
+    band_x = center_x - band_w / 2
+    svg.append(f'<rect x="{band_x}" y="{y0}" width="{band_w}" height="{h}" fill="none" stroke="#d00000" stroke-width="5"/>')
+    svg.append(f'<text x="{band_x+4}" y="{y0+h+16}" font-size="12" fill="#d00000">Airbag gap {airbag_gap_in:.1f}" between {airbag_gap_choice[0]}–{airbag_gap_choice[1]}</text>')
 
-    # Draw 15 boxes
+    # 15 boxes
     for i in range(cols):
         x = x0 + i * cell_w
-        y = y0
         spot_num = i + 1
         layers = plan[i]
 
         fill = "#ffffff" if not layers else color_for_pid(layers[0]["product_id"])
-        svg.append(f'<rect x="{x}" y="{y}" width="{cell_w}" height="{h}" fill="{fill}" opacity="0.55" stroke="#333" stroke-width="1"/>')
-        svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{spot_num}</text>')
+        svg.append(f'<rect x="{x}" y="{y0}" width="{cell_w}" height="{h}" fill="{fill}" opacity="0.55" stroke="#333" stroke-width="1"/>')
+        svg.append(f'<text x="{x+6}" y="{y0+16}" font-size="12" fill="#333">{spot_num}</text>')
 
-        # label lines per layer (truncate)
         if layers:
-            # Show up to 3 lines; tooltip shows full
             tooltip = " | ".join([f'{ly["product_id"]} x{ly["tiers"]}' for ly in layers])
             svg.append(f"<title>Spot {spot_num}: {tooltip}</title>")
 
-            max_lines = 3
-            for li, ly in enumerate(layers[:max_lines]):
+            # 3 lines max
+            for li, ly in enumerate(layers[:3]):
                 txt = f'{ly["product_id"]} x{ly["tiers"]}'
-                svg.append(f'<text x="{x+6}" y="{y+42 + li*16}" font-size="12" fill="#000">{txt[:22]}</text>')
-
-            if len(layers) > max_lines:
-                svg.append(f'<text x="{x+6}" y="{y+42 + max_lines*16}" font-size="12" fill="#000">+{len(layers)-max_lines} more</text>')
+                svg.append(f'<text x="{x+6}" y="{y0+44 + li*16}" font-size="12" fill="#000">{txt[:22]}</text>')
+            if len(layers) > 3:
+                svg.append(f'<text x="{x+6}" y="{y0+44 + 3*16}" font-size="12" fill="#000">+{len(layers)-3} more</text>')
 
     svg.append("</svg>")
     return "\n".join(svg)
 
 
-def render_side_svg_1x15(
+def render_side_svg(
     *,
     car_id: str,
     plan: list[list[dict]],
@@ -232,7 +248,7 @@ def render_side_svg_1x15(
     mirror_layers: bool,
 ) -> str:
     cols = FLOOR_SPOTS
-    W, H = 1200, 360
+    W, H = 1200, 380
     margin = 30
     header_h = 45
 
@@ -264,10 +280,16 @@ def render_side_svg_1x15(
     # Base line
     svg.append(f'<line x1="{x0}" y1="{base_y}" x2="{x0+plot_w}" y2="{base_y}" stroke="#000" stroke-width="1"/>')
 
-    # Inside height reference line
+    # Inside height ref line
     top_ref_y = base_y - float(car_inside_height_in) * scale
     svg.append(f'<line x1="{x0}" y1="{top_ref_y}" x2="{x0+plot_w}" y2="{top_ref_y}" stroke="#999" stroke-width="1" />')
     svg.append(f'<text x="{x0+4}" y="{top_ref_y-6}" font-size="12" fill="#666">Inside height ref</text>')
+
+    # Doorway bracket on side view (visual reference)
+    door_left = x0 + (DOOR_START_SPOT - 1) * cell_w
+    door_right = x0 + DOOR_END_SPOT * cell_w
+    svg.append(f'<rect x="{door_left}" y="{y0}" width="{door_right-door_left}" height="{plot_h}" fill="none" stroke="#c00000" stroke-width="2" opacity="0.5"/>')
+    svg.append(f'<text x="{door_left+6}" y="{y0+16}" font-size="12" fill="#c00000">Doorway</text>')
 
     for i in range(cols):
         layers = plan[i]
@@ -275,17 +297,14 @@ def render_side_svg_1x15(
         x = x0 + i * cell_w + 2
         w = cell_w - 4
 
-        # Spot number on baseline
         svg.append(f'<text x="{x+2}" y="{base_y+14}" font-size="11" fill="#333">{spot_num}</text>')
 
         if not layers:
             continue
 
-        # stack segments bottom-up
-        segs = layers[::-1] if mirror_layers else layers[:]  # mirror = reverse tier order visually
+        segs = layers[::-1] if mirror_layers else layers[:]
         y_cursor = base_y
 
-        # Tooltip for full composition
         tooltip = " | ".join([f'{ly["product_id"]} x{ly["tiers"]}' for ly in layers])
         svg.append(f"<title>Spot {spot_num}: {tooltip}</title>")
 
@@ -298,8 +317,6 @@ def render_side_svg_1x15(
             y_cursor -= seg_h
             fill = color_for_pid(pid)
             svg.append(f'<rect x="{x}" y="{y_cursor}" width="{w}" height="{seg_h}" fill="{fill}" stroke="#333" stroke-width="1"/>')
-
-            # label the segment (short)
             label = f"{pid} x{tiers}"
             svg.append(f'<text x="{x+3}" y="{y_cursor+14}" font-size="11" fill="#000">{label[:16]}</text>')
 
@@ -310,13 +327,8 @@ def render_side_svg_1x15(
 # =============================
 # App
 # =============================
-try:
-    pm = load_product_master(MASTER_PATH)
-except Exception as e:
-    st.error(f"Could not load Product Master at '{MASTER_PATH}'. Error: {e}")
-    st.stop()
+pm = load_product_master(MASTER_PATH)
 
-# Session init
 if "plan" not in st.session_state:
     st.session_state.plan = init_plan()
 if "selected_commodity" not in st.session_state:
@@ -324,22 +336,24 @@ if "selected_commodity" not in st.session_state:
 if "selected_facility" not in st.session_state:
     st.session_state.selected_facility = "(All facilities)"
 
-# Sidebar
 with st.sidebar:
     st.header("Settings")
     car_id = st.text_input("Car ID", value="TBOX632012")
     scenario = st.selectbox("Scenario", ["RTD_SHTG", "BC", "SIDING"], index=0)
 
     st.divider()
-    st.header("Stacking / Geometry")
-    max_tiers = st.slider("Max tiers per floor spot", 1, 8, 4)  # you said 3–4 typical
+    st.header("Stacking")
+    max_tiers = st.slider("Max tiers per floor spot", 1, 8, 4)
     car_inside_height_in = st.number_input("Inside height ref (in)", min_value=60.0, value=110.0, step=1.0)
 
     st.divider()
     st.header("Doorway / Airbag")
-    airbag_between_spots = st.slider("Airbag location (between spot k and k+1)", 1, 14, 7)
+    # limit choices to allowed 1-spot movement around typical 7-8
+    gap_labels = [f"{a}–{b}" for a, b in AIRBAG_ALLOWED_GAPS]
+    default_idx = gap_labels.index("7–8") if "7–8" in gap_labels else 1
+    gap_choice_label = st.selectbox("Airbag location (allowed: 6–7, 7–8, 8–9)", gap_labels, index=default_idx)
     airbag_gap_in = st.slider("Airbag gap (in)", 6.0, 9.0, 9.0, 0.5)
-    unit_length_ref_in = st.number_input("Unit length reference (in) (for drawing gap)", min_value=1.0, value=96.0, step=1.0)
+    unit_length_ref_in = st.number_input("Unit length reference (in) (draw gap scale)", min_value=1.0, value=96.0, step=1.0)
 
     st.divider()
     st.header("Diagram")
@@ -352,10 +366,9 @@ st.success(f"Product Master loaded: {len(pm):,} rows")
 commodities = sorted(pm[COL_COMMODITY].dropna().astype(str).unique().tolist())
 commodity_selected = st.selectbox("Commodity / Product Type (required)", ["(Select)"] + commodities)
 
-# Clear plan on commodity change
 if commodity_selected != st.session_state.selected_commodity:
     if any(st.session_state.plan):
-        st.warning("Commodity changed — clearing plan to prevent OSB/PLY mixing.")
+        st.warning("Commodity changed — clearing plan to prevent mixing.")
     st.session_state.plan = init_plan()
     st.session_state.selected_commodity = commodity_selected
     st.session_state.selected_facility = "(All facilities)"
@@ -370,10 +383,9 @@ pm_c = pm[pm[COL_COMMODITY].astype(str) == str(commodity_selected)].copy()
 facilities = sorted(pm_c[COL_FACILITY].dropna().astype(str).unique().tolist()) if COL_FACILITY in pm_c.columns else []
 facility_selected = st.selectbox("Facility Id (filtered by commodity)", ["(All facilities)"] + facilities)
 
-# Clear plan on facility change
 if facility_selected != st.session_state.selected_facility:
     if any(st.session_state.plan):
-        st.warning("Facility changed — clearing plan to prevent cross-facility mixing.")
+        st.warning("Facility changed — clearing plan.")
     st.session_state.plan = init_plan()
     st.session_state.selected_facility = facility_selected
 
@@ -381,7 +393,7 @@ pm_cf = pm_c.copy()
 if facility_selected != "(All facilities)" and COL_FACILITY in pm_cf.columns:
     pm_cf = pm_cf[pm_cf[COL_FACILITY].astype(str) == str(facility_selected)].copy()
 
-# Search + sort + dedupe for picker
+# Search + sort + dedupe
 search = st.text_input("Search (by Product Id or Description)", value="")
 if search.strip():
     s = search.strip().lower()
@@ -429,78 +441,68 @@ with c2:
 with c3:
     clear_btn = st.button("Clear Plan")
 with c4:
-    fill_btn = st.button("Auto-fill (demo)", help="Fills remaining spots with the selected SKU for quick testing.", disabled=(selected_label is None))
+    fill_btn = st.button("Auto-fill (demo)", disabled=(selected_label is None))
 
 if clear_btn:
     st.session_state.plan = init_plan()
 
-# Apply add
+# Add to plan (mixed tiers allowed)
 if add_btn and selected_label:
     idx = labels.index(selected_label)
     pid = options[idx][COL_PRODUCT_ID]
     add_layers_to_plan(st.session_state.plan, str(pid), int(tiers_to_add), int(max_tiers))
 
-# Auto-fill demo
+# quick demo fill
 if fill_btn and selected_label:
     idx = labels.index(selected_label)
     pid = options[idx][COL_PRODUCT_ID]
-    # Fill enough tiers to load all spots to max_tiers (demo)
     add_layers_to_plan(st.session_state.plan, str(pid), int(max_tiers * FLOOR_SPOTS), int(max_tiers))
 
-# Build lookup of product properties used in side view and payload
-# (We pull from master so heights/weights are always correct even if not in current picker list)
+# Build lookup + payload
 product_ids_in_plan = sorted({ly["product_id"] for spot in st.session_state.plan for ly in spot})
 product_lookup = {pid: lookup_product(pm, pid) for pid in product_ids_in_plan} if product_ids_in_plan else {}
-
 payload = plan_payload_lbs(st.session_state.plan, product_lookup)
 
-# Summary / spot table
+# Resolve airbag choice tuple
+airbag_gap_choice = AIRBAG_ALLOWED_GAPS[gap_labels.index(gap_choice_label)]
+
+# Summary
 st.subheader("Plan Summary")
-left, right = st.columns([2, 1])
+st.metric("Payload (lbs)", f"{payload:,.0f}")
 
-with right:
-    st.metric("Payload (lbs)", f"{payload:,.0f}")
-    st.caption("Payload is computed as: sum(tiers × Unit Weight) from Product Master.")
+rows = []
+for i, spot in enumerate(st.session_state.plan):
+    comp = " + ".join([f'{ly["product_id"]} x{ly["tiers"]}' for ly in spot]) if spot else ""
+    tiers_total = spot_tiers(spot)
+    height_in = 0.0
+    for ly in spot:
+        pid = ly["product_id"]
+        tiers = int(ly["tiers"])
+        uh = float(product_lookup.get(pid, {}).get("unit_height_in", 0.0))
+        height_in += tiers * uh
+    rows.append({"Spot": i + 1, "Tiers": tiers_total, "Height (in)": round(height_in, 2), "Composition": comp})
+st.dataframe(pd.DataFrame(rows), use_container_width=True, height=260)
 
-with left:
-    rows = []
-    for i, spot in enumerate(st.session_state.plan):
-        comp = " + ".join([f'{ly["product_id"]} x{ly["tiers"]}' for ly in spot]) if spot else ""
-        tiers_total = spot_tiers(spot)
-        height_in = 0.0
-        for ly in spot:
-            pid = ly["product_id"]
-            tiers = int(ly["tiers"])
-            uh = float(product_lookup.get(pid, {}).get("unit_height_in", 0.0))
-            height_in += tiers * uh
-        rows.append({"Spot": i + 1, "Tiers": tiers_total, "Height (in)": round(height_in, 2), "Composition": comp})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=260)
+# Airbag compliance status
+st.success(f"Doorway zone fixed: Spots {DOOR_START_SPOT}–{DOOR_END_SPOT}. Airbag at {airbag_gap_choice[0]}–{airbag_gap_choice[1]} @ {airbag_gap_in:.1f}\" (target 6–9\")")
 
-# Basic gap compliance (slider enforces it, but show status like Load Xpert)
-if 6.0 <= float(airbag_gap_in) <= 9.0:
-    st.success(f"Airbag gap OK: {airbag_gap_in:.1f}\" (target 6–9\")")
-else:
-    st.error(f"Airbag gap out of range: {airbag_gap_in:.1f}\" (target 6–9\")")
-
-# =============================
 # Render diagrams
-# =============================
 note = (
     f"Commodity: {commodity_selected} | Facility: {facility_selected} | "
     f"Floor spots: {FLOOR_SPOTS} | Max tiers/spot: {max_tiers} | "
-    f"Airbag between {airbag_between_spots}&{airbag_between_spots+1} @ {airbag_gap_in:.1f}\""
+    f"Doorway: {DOOR_START_SPOT}–{DOOR_END_SPOT}"
 )
 
-top_svg = render_top_svg_1x15(
+top_svg = render_top_svg(
     car_id=car_id,
     plan=st.session_state.plan,
     note=note,
-    airbag_between_spots=int(airbag_between_spots),
     airbag_gap_in=float(airbag_gap_in),
+    airbag_gap_choice=airbag_gap_choice,
     unit_length_ref_in=float(unit_length_ref_in),
 )
 
-side_a_svg = render_side_svg_1x15(
+side_a = render_side_svg(
     car_id=car_id,
     plan=st.session_state.plan,
     product_lookup=product_lookup,
@@ -509,7 +511,7 @@ side_a_svg = render_side_svg_1x15(
     mirror_layers=False,
 )
 
-side_b_svg = render_side_svg_1x15(
+side_b = render_side_svg(
     car_id=car_id,
     plan=st.session_state.plan,
     product_lookup=product_lookup,
@@ -519,21 +521,18 @@ side_b_svg = render_side_svg_1x15(
 )
 
 st.subheader("Diagram View")
-
 if view_mode == "Top only":
-    components.html(top_svg, height=260, scrolling=False)
-
+    components.html(top_svg, height=280, scrolling=False)
 elif view_mode == "Sides only":
     ca, cb = st.columns(2)
     with ca:
-        components.html(side_a_svg, height=380, scrolling=False)
+        components.html(side_a, height=400, scrolling=False)
     with cb:
-        components.html(side_b_svg, height=380, scrolling=False)
-
+        components.html(side_b, height=400, scrolling=False)
 else:
-    components.html(top_svg, height=260, scrolling=False)
+    components.html(top_svg, height=280, scrolling=False)
     ca, cb = st.columns(2)
     with ca:
-        components.html(side_a_svg, height=380, scrolling=False)
+        components.html(side_a, height=400, scrolling=False)
     with cb:
-        components.html(side_b_svg, height=380, scrolling=False)
+        components.html(side_b, height=400, scrolling=False)
