@@ -9,8 +9,8 @@ st.title("Load Diagram Optimizer")
 MASTER_PATH = "data/Ortec SP Product Master.xlsx"
 
 # --- columns in your Product Master ---
+COL_COMMODITY = "Product Type"      # primary filter
 COL_FACILITY = "Facility Id"
-COL_COMMODITY = "Product Type"
 COL_PRODUCT_ID = "Sales Product Id"
 COL_DESC = "Short Descrip"          # fallback to "Descrip" if needed
 COL_ACTIVE = "Active"
@@ -34,39 +34,35 @@ def load_product_master(path: str) -> pd.DataFrame:
     if COL_DESC not in df.columns and "Descrip" in df.columns:
         COL_DESC = "Descrip"
 
-    required = [COL_PRODUCT_ID, COL_UNIT_H, COL_UNIT_WT]
+    required = [COL_PRODUCT_ID, COL_UNIT_H, COL_UNIT_WT, COL_COMMODITY]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Product Master missing required columns: {missing}")
 
-    # Clean types
+    # Clean
     df[COL_PRODUCT_ID] = df[COL_PRODUCT_ID].astype(str).str.strip()
+    df[COL_COMMODITY] = df[COL_COMMODITY].astype(str).str.strip()
 
     if COL_FACILITY in df.columns:
         df[COL_FACILITY] = df[COL_FACILITY].astype(str).str.strip()
-
-    if COL_COMMODITY in df.columns:
-        df[COL_COMMODITY] = df[COL_COMMODITY].astype(str).str.strip()
-
     if COL_DESC in df.columns:
         df[COL_DESC] = df[COL_DESC].astype(str)
 
-    # numeric fields (safe even if missing)
+    # numeric fields
     for c in [COL_UNIT_H, COL_UNIT_WT, COL_THICK, COL_WIDTH, COL_LENGTH]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Normalize Half Pack -> bool
+    # Half pack -> bool
     if COL_HALF_PACK in df.columns:
         hp = df[COL_HALF_PACK].astype(str).str.strip().str.upper()
         df[COL_HALF_PACK] = hp.isin(["Y", "YES", "TRUE", "1"])
 
-    # Filter Active if present
+    # Active filter
     if COL_ACTIVE in df.columns:
         act = df[COL_ACTIVE].astype(str).str.strip().str.upper()
         df = df[act.isin(["Y", "YES", "TRUE", "1", "ACTIVE"])].copy()
 
-    # Must have height/weight
     df = df.dropna(subset=[COL_UNIT_H, COL_UNIT_WT])
     return df
 
@@ -79,8 +75,8 @@ def lookup_product(df: pd.DataFrame, product_id: str) -> dict:
     r = row.iloc[0]
     return {
         "product_id": pid,
-        "facility_id": r[COL_FACILITY] if COL_FACILITY in df.columns else "",
         "commodity": r[COL_COMMODITY] if COL_COMMODITY in df.columns else "",
+        "facility_id": r[COL_FACILITY] if COL_FACILITY in df.columns else "",
         "description": r[COL_DESC] if COL_DESC in df.columns else "",
         "unit_height_in": float(r[COL_UNIT_H]),
         "unit_weight_lbs": float(r[COL_UNIT_WT]),
@@ -210,88 +206,87 @@ with st.sidebar:
     st.divider()
     st.header("Grid Capacity (placeholder)")
     tiers_capacity = st.slider("Capacity per spot (tiers)", min_value=1, max_value=12, value=7)
-    st.caption("For now, each spot holds up to `tiers` units. We'll later tie this to unit height and car inside height.")
 
 
 # =============================
-# Facility + Commodity + Product Mix
+# Product Mix
 # =============================
 st.subheader("Product Mix (multiple products per car)")
 
-# Facility filter (above commodity)
-if COL_FACILITY in pm.columns:
-    facilities = sorted(pm[COL_FACILITY].dropna().astype(str).unique().tolist())
-    facility_selected = st.selectbox("Facility Id", ["(All)"] + facilities)
-else:
-    facility_selected = "(All)"
-    st.warning("Column 'Facility Id' not found. Facility filter disabled.")
+# --- Commodity is the MAIN filter ---
+commodities = sorted(pm[COL_COMMODITY].dropna().astype(str).unique().tolist())
+commodity_selected = st.selectbox("Commodity / Product Type (required)", ["(Select)"] + commodities)
 
-# Commodity filter (Product Type)
-if COL_COMMODITY in pm.columns:
-    commodities = sorted(pm[COL_COMMODITY].dropna().astype(str).unique().tolist())
-    commodity_selected = st.selectbox("Commodity / Product Type", ["(Select)"] + commodities)
-else:
-    commodity_selected = "(Select)"
-    st.warning("Column 'Product Type' not found. Commodity filter disabled.")
-
-# Track filter changes and clear mix to prevent accidents
-if "selected_facility" not in st.session_state:
-    st.session_state.selected_facility = facility_selected
-if "selected_commodity" not in st.session_state:
-    st.session_state.selected_commodity = commodity_selected
 if "mix" not in st.session_state:
     st.session_state.mix = []
+if "selected_commodity" not in st.session_state:
+    st.session_state.selected_commodity = commodity_selected
+if "selected_facility" not in st.session_state:
+    st.session_state.selected_facility = "(All facilities for this commodity)"
 
-filters_changed = (
-    facility_selected != st.session_state.selected_facility
-    or commodity_selected != st.session_state.selected_commodity
-)
-
-if filters_changed:
+# If commodity changes, clear mix + reset facility
+if commodity_selected != st.session_state.selected_commodity:
     if st.session_state.mix:
-        st.warning("Facility/Commodity changed — clearing mix to prevent accidental mixing.")
+        st.warning("Commodity changed — clearing mix to prevent OSB/PLY mixing.")
+        st.session_state.mix = []
+    st.session_state.selected_commodity = commodity_selected
+    st.session_state.selected_facility = "(All facilities for this commodity)"
+
+# Stop until commodity chosen
+if commodity_selected == "(Select)":
+    st.info("Select a Commodity/Product Type first. Then you can pick a Facility and Products.")
+    st.stop()
+
+# Now filter master to this commodity
+pm_c = pm[pm[COL_COMMODITY].astype(str) == str(commodity_selected)].copy()
+
+# Facility dropdown is built ONLY from this commodity set
+if COL_FACILITY in pm_c.columns:
+    facilities = sorted(pm_c[COL_FACILITY].dropna().astype(str).unique().tolist())
+    facility_selected = st.selectbox(
+        "Facility Id (filtered by commodity)",
+        ["(All facilities for this commodity)"] + facilities,
+        index=0 if st.session_state.selected_facility not in facilities else (facilities.index(st.session_state.selected_facility) + 1),
+    )
+else:
+    facility_selected = "(All facilities for this commodity)"
+    st.warning("Column 'Facility Id' not found. Facility filter disabled.")
+
+# If facility changes, clear mix (prevents accidental mixing)
+if facility_selected != st.session_state.selected_facility:
+    if st.session_state.mix:
+        st.warning("Facility changed — clearing mix to prevent cross-facility mixing.")
         st.session_state.mix = []
     st.session_state.selected_facility = facility_selected
-    st.session_state.selected_commodity = commodity_selected
 
-# Apply filters
-pm_filtered = pm.copy()
+# Apply facility filter if selected
+pm_cf = pm_c.copy()
+if facility_selected != "(All facilities for this commodity)" and COL_FACILITY in pm_cf.columns:
+    pm_cf = pm_cf[pm_cf[COL_FACILITY].astype(str) == str(facility_selected)].copy()
 
-if facility_selected != "(All)" and COL_FACILITY in pm_filtered.columns:
-    pm_filtered = pm_filtered[pm_filtered[COL_FACILITY].astype(str) == str(facility_selected)].copy()
-
-if commodity_selected != "(Select)" and COL_COMMODITY in pm_filtered.columns:
-    pm_filtered = pm_filtered[pm_filtered[COL_COMMODITY].astype(str) == str(commodity_selected)].copy()
-
-# Search within filters
+# Search within filtered set
 search = st.text_input("Search (by Product Id or Description)", value="")
 if search.strip():
     s = search.strip().lower()
-    pm_filtered = pm_filtered[
-        pm_filtered[COL_PRODUCT_ID].astype(str).str.lower().str.contains(s)
-        | (pm_filtered[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_filtered.columns else False)
+    pm_cf = pm_cf[
+        pm_cf[COL_PRODUCT_ID].astype(str).str.lower().str.contains(s)
+        | (pm_cf[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_cf.columns else False)
     ].copy()
 
-# Auto-sort by thickness/size (best first)
-sort_cols = []
-ascending = []
-
-if COL_THICK in pm_filtered.columns:
+# Sort by thickness / size automatically
+sort_cols, ascending = [], []
+if COL_THICK in pm_cf.columns:
     sort_cols.append(COL_THICK); ascending.append(False)
-if COL_WIDTH in pm_filtered.columns:
+if COL_WIDTH in pm_cf.columns:
     sort_cols.append(COL_WIDTH); ascending.append(False)
-if COL_LENGTH in pm_filtered.columns:
+if COL_LENGTH in pm_cf.columns:
     sort_cols.append(COL_LENGTH); ascending.append(False)
-
-# Always stable sort by Product ID last
 sort_cols.append(COL_PRODUCT_ID); ascending.append(True)
 
-pm_filtered = pm_filtered.sort_values(by=sort_cols, ascending=ascending, na_position="last")
+pm_cf = pm_cf.sort_values(by=sort_cols, ascending=ascending, na_position="last")
 
-# De-dupe dropdown: keep first row per Sales Product Id (after sorting!)
-pm_filtered = pm_filtered.drop_duplicates(subset=[COL_PRODUCT_ID], keep="first")
-
-pm_filtered = pm_filtered.head(5000)
+# De-dupe by Sales Product Id after sorting
+pm_cf = pm_cf.drop_duplicates(subset=[COL_PRODUCT_ID], keep="first").head(5000)
 
 def label_row(r: dict) -> str:
     pid = r.get(COL_PRODUCT_ID, "")
@@ -299,35 +294,24 @@ def label_row(r: dict) -> str:
     thick = r.get(COL_THICK, None)
     w = r.get(COL_WIDTH, None)
     l = r.get(COL_LENGTH, None)
-
-    # Build a helpful label: ID | thickness | WxL | description
     parts = [str(pid)]
-
     if pd.notna(thick):
         parts.append(f'{thick:g}"')
     if pd.notna(w) and pd.notna(l):
         parts.append(f"{int(w)}x{int(l)}")
-
     if str(desc).strip():
         parts.append(str(desc).strip())
-
     return " | ".join(parts)
 
-options = pm_filtered.to_dict("records")
+options = pm_cf.to_dict("records")
 labels = [label_row(r) for r in options]
-
-# Disable picker until commodity chosen
-if commodity_selected == "(Select)":
-    st.info("Select a Commodity/Product Type to enable product selection.")
-    selected_label = None
-else:
-    selected_label = st.selectbox("Pick a Product", labels) if labels else None
+selected_label = st.selectbox("Pick a Product", labels) if labels else None
 
 c1, c2, c3 = st.columns([2, 1, 1], vertical_alignment="bottom")
 with c1:
     units_to_add = st.number_input("Units to add", min_value=1, value=10, step=1)
 with c2:
-    add_btn = st.button("Add to Mix", disabled=(commodity_selected == "(Select)" or selected_label is None))
+    add_btn = st.button("Add to Mix", disabled=(selected_label is None))
 with c3:
     clear_btn = st.button("Clear Mix")
 
@@ -340,16 +324,15 @@ if add_btn and selected_label:
     prod = lookup_product(pm, pid)
     prod["units"] = int(units_to_add)
 
-    # Guardrail: lock facility + commodity once mix starts
+    # Guardrail: enforce commodity + facility consistency
     if st.session_state.mix:
-        ex_fac = st.session_state.mix[0].get("facility_id", "")
         ex_com = st.session_state.mix[0].get("commodity", "")
-        if prod.get("facility_id", "") != ex_fac:
-            st.error(f"Cannot mix facilities: mix is '{ex_fac}', selected is '{prod.get('facility_id','')}'.")
-        elif prod.get("commodity", "") != ex_com:
+        ex_fac = st.session_state.mix[0].get("facility_id", "")
+        if prod.get("commodity", "") != ex_com:
             st.error(f"Cannot mix commodities: mix is '{ex_com}', selected is '{prod.get('commodity','')}'.")
+        elif facility_selected != "(All facilities for this commodity)" and prod.get("facility_id", "") != ex_fac:
+            st.error(f"Cannot mix facilities: mix is '{ex_fac}', selected is '{prod.get('facility_id','')}'.")
         else:
-            # increment if exists
             for m in st.session_state.mix:
                 if m["product_id"] == prod["product_id"]:
                     m["units"] += prod["units"]
@@ -359,10 +342,7 @@ if add_btn and selected_label:
     else:
         st.session_state.mix.append(prod)
 
-
-# =============================
-# Mix Summary + Checks
-# =============================
+# Summary
 if not st.session_state.mix:
     st.info("Add at least one product to the mix.")
 else:
@@ -372,43 +352,23 @@ else:
 
     total_units = int(mix_df["units"].sum())
     total_weight = float((mix_df["units"] * mix_df["unit_weight_lbs"]).sum())
-    half_units = int(mix_df.loc[mix_df["half_pack"] == True, "units"].sum())
 
-    fac_in_mix = mix_df["facility_id"].iloc[0] if "facility_id" in mix_df.columns else ""
-    com_in_mix = mix_df["commodity"].iloc[0] if "commodity" in mix_df.columns else ""
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Commodity", str(mix_df["commodity"].iloc[0]))
+    k2.metric("Facility", str(mix_df["facility_id"].iloc[0]))
+    k3.metric("Total Weight (lbs)", f"{total_weight:,.0f}")
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Facility", str(fac_in_mix))
-    k2.metric("Commodity", str(com_in_mix))
-    k3.metric("Total Units", f"{total_units:,}")
-    k4.metric("Total Weight (lbs)", f"{total_weight:,.0f}")
-
-    if scenario == "RTD_SHTG" and (half_units % 2 != 0):
-        st.warning(f"RTD_SHTG preview rule: Half-Pack units must be EVEN. Half-pack units = {half_units} (ODD).")
-
-    if max_load_lbs > 0 and total_weight > max_load_lbs:
-        st.error(f"Total weight exceeds car max load: {total_weight:,.0f} > {max_load_lbs:,.0f} lbs")
-
-
-# =============================
-# Top View: 45 Spot Grid + Labels
-# =============================
+# Top View
 st.subheader("Top View — Spot Grid (1–45)")
-
-COLS = 15
-ROWS = 3
+COLS, ROWS = 15, 3
 SPOTS = COLS * ROWS
 
 if st.session_state.mix:
     spot_contents = allocate_to_spots(st.session_state.mix, spots=SPOTS, capacity_per_spot=int(tiers_capacity))
-    title_note = (
-        f"Facility: {st.session_state.mix[0].get('facility_id','')} | "
-        f"Commodity: {st.session_state.mix[0].get('commodity','')} | "
-        f"Capacity/spot: {tiers_capacity} | Spots: {SPOTS} (15x3)"
-    )
+    title_note = f"Commodity: {commodity_selected} | Facility: {facility_selected} | Capacity/spot: {tiers_capacity}"
 else:
     spot_contents = [[] for _ in range(SPOTS)]
-    title_note = "Select Facility + Commodity, add products, and the spots will populate."
+    title_note = f"Commodity: {commodity_selected} | Facility: {facility_selected} | Add products to populate spots."
 
 svg = render_spot_grid_svg(
     car_id=car_id,
