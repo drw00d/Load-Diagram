@@ -63,4 +63,5 @@ if st.button("Run Test"):
 
     st.subheader("Top View (placeholder)")
     svg = render_top_view_svg(cols_left, cols_right, center_gap)
-    st.image(svg.encode("utf-8"))
+    st.markdown(svg, unsafe_allow_html=True)
+
