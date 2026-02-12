@@ -149,12 +149,6 @@ def spot_side_outside_doorway(spot: int) -> str:
     return "A" if (spot % 2 == 1) else "B"
 
 
-def spot_belongs_to_side(spot: int, side: str) -> bool:
-    if is_doorway_spot(spot):
-        return True
-    return spot_side_outside_doorway(spot) == side
-
-
 def outside_doorway_spots() -> List[int]:
     return [s for s in range(1, FLOOR_SPOTS + 1) if not is_doorway_spot(s)]
 
@@ -196,25 +190,18 @@ def next_empty_tier_index(matrix: List[List[Optional[str]]], spot: int) -> Optio
 
 
 def can_place_pid_hard(products: Dict[str, Product], pid: str, spot: int) -> Tuple[bool, str]:
-    """
-    Hard rules only.
-    """
     p = products[pid]
-    # Machine edge not allowed in doorframe 6/9
     if p.is_machine_edge and spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
         return False, f"Machine Edge not allowed in Spot {spot} (doorframe)."
     return True, ""
 
 
 def soft_penalty(products: Dict[str, Product], pid: str, tier_idx: int, max_tiers: int) -> int:
-    """
-    Soft preference: avoid half pack on top, but allow if needed.
-    Lower score is better.
-    """
+    # Soft preference: avoid half pack on top, but allow if needed
     p = products[pid]
     penalty = 0
     if p.is_half_pack and tier_idx == (max_tiers - 1):
-        penalty += 100  # strong discourage, but not prohibited
+        penalty += 100
     return penalty
 
 
@@ -243,9 +230,6 @@ def pop_best_placeable(
     tier_idx: int,
     max_tiers: int,
 ) -> Optional[str]:
-    """
-    Choose the first *hard-placeable* token with the lowest soft penalty for this tier.
-    """
     best_i = None
     best_score = None
     for i, pid in enumerate(tokens):
@@ -257,7 +241,7 @@ def pop_best_placeable(
             best_score = score
             best_i = i
             if score == 0:
-                break  # can't do better
+                break
     if best_i is None:
         return None
     return tokens.pop(best_i)
@@ -268,17 +252,11 @@ def find_spot_for_pid_with_pins(
     products: Dict[str, Product],
     pid: str,
     tier_idx: int,
-    max_tiers: int,
     base_order: List[int],
 ) -> Optional[int]:
-    """
-    PIN rule:
-      - If pid is Machine Edge: prefer doorway pocket 7/8 first (if tier slot available)
-      - Never allow Machine Edge in 6/9 (hard rule)
-      - Otherwise: normal base_order scan
-    """
     p = products[pid]
 
+    # Machine Edge prefers 7/8 (door pocket)
     if p.is_machine_edge:
         for s in [7, 8]:
             if not spot_has_capacity(matrix, s):
@@ -299,7 +277,6 @@ def find_spot_for_pid_with_pins(
         ok, _ = can_place_pid_hard(products, pid, s)
         if ok:
             return s
-
     return None
 
 
@@ -315,25 +292,12 @@ def count_top_halfpacks(matrix: List[List[Optional[str]]], products: Dict[str, P
     return c
 
 
-def repair_reduce_top_halfpacks(
-    matrix: List[List[Optional[str]]],
-    products: Dict[str, Product],
-) -> int:
+def repair_reduce_top_halfpacks(matrix: List[List[Optional[str]]], products: Dict[str, Product]) -> int:
     """
-    Option B: automatic repair pass (swap) to reduce half packs on top tier.
-    We do NOT stop optimization if half packs must be on top (soft rule),
-    but we try to swap them down when possible.
-
-    Strategy:
-      - For each top-tier half pack:
-         1) try swap with a full-pack below in same spot
-         2) else try swap with a full-pack in a lower tier in another spot
-         3) ensure hard rules still satisfied for swapped positions
-    Returns number of successful swaps.
+    Swap repair pass to reduce half packs on TOP tier (soft rule).
     """
     if not matrix:
         return 0
-
     top = len(matrix[0]) - 1
     swaps = 0
 
@@ -343,26 +307,21 @@ def repair_reduce_top_halfpacks(
     def is_full(pid: Optional[str]) -> bool:
         return bool(pid and pid in products and (not products[pid].is_half_pack))
 
-    # build list of top-tier halfpack positions
-    targets: List[int] = []
-    for spot in range(1, FLOOR_SPOTS + 1):
-        if is_half(matrix[spot - 1][top]):
-            targets.append(spot)
+    targets = [s for s in range(1, FLOOR_SPOTS + 1) if is_half(matrix[s - 1][top])]
 
     for spot in targets:
         hp_pid = matrix[spot - 1][top]
         if not hp_pid:
             continue
 
-        # 1) swap within same spot (find any full below)
+        # Swap within same spot if possible
         for t in range(top - 1, -1, -1):
             below = matrix[spot - 1][t]
             if not is_full(below):
                 continue
-
-            ok1, _ = can_place_pid_hard(products, below, spot)
-            ok2, _ = can_place_pid_hard(products, hp_pid, spot)
-            if ok1 and ok2:
+            ok_below, _ = can_place_pid_hard(products, below, spot)
+            ok_hp, _ = can_place_pid_hard(products, hp_pid, spot)
+            if ok_below and ok_hp:
                 matrix[spot - 1][top], matrix[spot - 1][t] = below, hp_pid
                 swaps += 1
                 hp_pid = None
@@ -370,7 +329,7 @@ def repair_reduce_top_halfpacks(
         if hp_pid is None:
             continue
 
-        # 2) swap with another spot's full in lower tier
+        # Swap with another spot's full below-top
         swapped = False
         for other_spot in range(1, FLOOR_SPOTS + 1):
             if other_spot == spot:
@@ -379,12 +338,8 @@ def repair_reduce_top_halfpacks(
                 cand = matrix[other_spot - 1][t]
                 if not is_full(cand):
                     continue
-
-                # cand would move to top of 'spot'
                 ok_cand_top, _ = can_place_pid_hard(products, cand, spot)
-                # hp would move to lower tier at other_spot
                 ok_hp_low, _ = can_place_pid_hard(products, hp_pid, other_spot)
-                # also keep other spot hard validity for top cell (cand removed from lower tier doesn't violate hard rules)
                 if ok_cand_top and ok_hp_low:
                     matrix[spot - 1][top] = cand
                     matrix[other_spot - 1][t] = hp_pid
@@ -421,7 +376,6 @@ def optimize_layout(
     def tier_pref_group(tier_idx: int) -> str:
         return "heavy" if (tier_idx % 2 == 0) else "light"
 
-    # Main greedy fill loop (even spots, vertical heavy/light, soft halfpack-on-top)
     while (heavy or light) and any(spot_has_capacity(matrix, s) for s in range(1, FLOOR_SPOTS + 1)):
         # pick least-filled spot
         best_spot = None
@@ -442,18 +396,14 @@ def optimize_layout(
 
         pref = tier_pref_group(tier_idx)
 
-        # Pick token with best soft score for this (spot,tier), obeying hard rules
         pid = None
         if pref == "heavy":
-            pid = pop_best_placeable(heavy, products, best_spot, tier_idx, max_tiers_per_spot)
-            if pid is None:
-                pid = pop_best_placeable(light, products, best_spot, tier_idx, max_tiers_per_spot)
+            pid = pop_best_placeable(heavy, products, best_spot, tier_idx, max_tiers_per_spot) \
+                  or pop_best_placeable(light, products, best_spot, tier_idx, max_tiers_per_spot)
         else:
-            pid = pop_best_placeable(light, products, best_spot, tier_idx, max_tiers_per_spot)
-            if pid is None:
-                pid = pop_best_placeable(heavy, products, best_spot, tier_idx, max_tiers_per_spot)
+            pid = pop_best_placeable(light, products, best_spot, tier_idx, max_tiers_per_spot) \
+                  or pop_best_placeable(heavy, products, best_spot, tier_idx, max_tiers_per_spot)
 
-        # If nothing works in this spot/tier, search other spots with same tier_idx
         if pid is None:
             found = False
             for s in base_order:
@@ -474,32 +424,18 @@ def optimize_layout(
                     tier_idx = ti
                     found = True
                     break
-
             if not found:
                 msgs.append(f"Could not place any remaining tiers at Tier {tier_idx+1} due to constraints/capacity.")
                 break
 
-        # PIN: if machine-edge, prefer 7/8 for that same tier
-        pinned_spot = find_spot_for_pid_with_pins(
-            matrix=matrix,
-            products=products,
-            pid=pid,
-            tier_idx=tier_idx,
-            max_tiers=max_tiers_per_spot,
-            base_order=base_order,
-        )
-        if pinned_spot is not None:
-            best_spot = pinned_spot
+        # PIN placement for machine edge
+        pinned = find_spot_for_pid_with_pins(matrix, products, pid, tier_idx, base_order)
+        if pinned is not None:
+            best_spot = pinned
 
         ok, why = can_place_pid_hard(products, pid, best_spot)
         if not ok:
-            # Should be rare because selection checks hard rules, but keep safe
             msgs.append(f"Skipped {pid} at Spot {best_spot}, Tier {tier_idx+1}: {why}")
-            # Put back so we don't lose it
-            if pref == "heavy":
-                heavy.insert(0, pid)
-            else:
-                light.insert(0, pid)
             break
 
         matrix[best_spot - 1][tier_idx] = pid
@@ -508,21 +444,21 @@ def optimize_layout(
     if remaining > 0:
         msgs.append(f"{remaining} tiers could not be placed (capacity/rules).")
 
-    # Option B repair: try to swap away half packs on top tier (soft rule)
+    # Repair pass (soft)
     before = count_top_halfpacks(matrix, products)
     swaps = repair_reduce_top_halfpacks(matrix, products)
     after = count_top_halfpacks(matrix, products)
 
     if swaps > 0:
-        msgs.append(f"Repair pass: performed {swaps} swap(s) to reduce Half Packs on top (before={before}, after={after}).")
+        msgs.append(f"Repair pass: {swaps} swap(s) to reduce Half Packs on top (before={before}, after={after}).")
     else:
-        msgs.append(f"Repair pass: no swaps found (Half Packs on top = {after}).")
+        msgs.append(f"Repair pass: no swaps found (Half Packs on top={after}).")
 
     return matrix, msgs
 
 
 # =============================
-# Rendering
+# Rendering helpers
 # =============================
 def color_for_pid(pid: str) -> str:
     palette = [
@@ -546,6 +482,9 @@ def airbag_center_px(x0: float, cell_w: float, gap_choice: Tuple[int, int]) -> f
     return x0 + a * cell_w
 
 
+# =============================
+# Top view (stagger outside doorway only)
+# =============================
 def render_top_svg(
     *,
     car_id: str,
@@ -640,9 +579,7 @@ def render_top_svg(
             svg.append(f"<title>Spot {spot}: {tooltip}</title>")
 
             for li, (pid, cnt) in enumerate(items[:2]):
-                hp = ""
-                if pid in products and products[pid].is_half_pack:
-                    hp = " HP"
+                hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
                 svg.append(f'<text x="{x+6}" y="{y+44 + li*16}" font-size="12" fill="#000">{pid}{hp} x{cnt}</text>')
             if len(items) > 2:
                 svg.append(f'<text x="{x+6}" y="{y+44 + 2*16}" font-size="12" fill="#000">+{len(items)-2} more</text>')
@@ -652,7 +589,7 @@ def render_top_svg(
             svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#7a0000" stroke-width="3"/>')
             svg.append(f'<text x="{x+6}" y="{y+box_h-8}" font-size="11" fill="#7a0000">NO Machine Edge</text>')
 
-        # Soft warning: half pack on top (outline)
+        # Soft warning outline: half pack on top
         top_pid = col[top_idx] if col and top_idx < len(col) else None
         if top_pid and top_pid in products and products[top_pid].is_half_pack:
             svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#ff00aa" stroke-width="4" opacity="0.8"/>')
@@ -661,72 +598,115 @@ def render_top_svg(
     return "\n".join(svg)
 
 
-def render_side_grid_svg(
+# =============================
+# NEW Side view (Load-Xpert-ish)
+# =============================
+def render_side_loadxpert_svg(
     *,
     car_id: str,
     matrix: List[List[Optional[str]]],
     products: Dict[str, Product],
-    side_name: str,
-    side_filter: str,  # "A" or "B"
+    title: str,
+    airbag_gap_choice: Tuple[int, int],
+    airbag_gap_in: float,
+    unit_length_ref_in: float,
 ) -> str:
     tiers = len(matrix[0]) if matrix else 0
-    top = tiers - 1
     W = 1200
-    H = 120 + tiers * 70
-    margin = 25
+    H = 420
+    margin = 24
 
-    grid_x = margin
-    grid_y = margin + 55
-    grid_w = W - 2 * margin
-    cell_w = grid_w / FLOOR_SPOTS
-    cell_h = 60
+    # Car drawing region
+    x0 = margin
+    y0 = margin + 60
+    car_w = W - 2 * margin
+    car_h = H - y0 - margin
+
+    # Inner load area
+    pad = 18
+    load_x = x0 + pad
+    load_y = y0 + pad
+    load_w = car_w - 2 * pad
+    load_h = car_h - 2 * pad
+
+    cell_w = load_w / FLOOR_SPOTS
+    cell_h = load_h / max(1, tiers)
+
+    # Airbag band width
+    frac = 0.0 if unit_length_ref_in <= 0 else (float(airbag_gap_in) / float(unit_length_ref_in))
+    band_w = max(8.0, min(cell_w * 0.9, cell_w * frac))
+
+    # Doorway bounds
+    door_left = load_x + (DOOR_START_SPOT - 1) * cell_w
+    door_right = load_x + DOOR_END_SPOT * cell_w
+
+    # Airbag center at boundary between a-b
+    a, b = airbag_gap_choice
+    airbag_x_center = load_x + a * cell_w
+    airbag_x = airbag_x_center - band_w / 2
 
     svg = []
     svg.append(f'<svg width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">')
-    svg.append(f'<rect x="{margin}" y="{margin}" width="{W-2*margin}" height="{H-2*margin}" fill="white" stroke="black" stroke-width="2"/>')
-    svg.append(f'<text x="{margin+8}" y="{margin+28}" font-size="16" font-weight="600">Car: {car_id} — {side_name}</text>')
-    svg.append(f'<text x="{margin+8}" y="{margin+48}" font-size="12" fill="#444">Spots (1–15) × tiers. Doorway 6–9 shown on both sides. Pink outline = Half Pack on TOP (soft warning).</text>')
+    svg.append("""
+    <defs>
+      <pattern id="doorHatch2" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="10" stroke="#c00000" stroke-width="2" opacity="0.25"/>
+      </pattern>
+    </defs>
+    """)
+    svg.append(f'<rect x="0" y="0" width="{W}" height="{H}" fill="white"/>')
 
-    door_left = grid_x + (DOOR_START_SPOT - 1) * cell_w
-    door_right = grid_x + DOOR_END_SPOT * cell_w
-    svg.append(f'<rect x="{door_left}" y="{grid_y}" width="{door_right-door_left}" height="{tiers*cell_h}" fill="none" stroke="#c00000" stroke-width="3" opacity="0.8"/>')
+    # Header
+    svg.append(f'<text x="{margin}" y="{margin+22}" font-size="18" font-weight="700">{title}</text>')
+    svg.append(f'<text x="{margin}" y="{margin+44}" font-size="13" fill="#333">Car: {car_id} • Doorway {DOOR_START_SPOT}–{DOOR_END_SPOT} • Airbag {a}–{b} @ {airbag_gap_in:.1f}"</text>')
 
-    # Tier labels left
-    for t in range(tiers):
-        display_row = tiers - 1 - t
-        y = grid_y + display_row * cell_h
-        svg.append(f'<text x="{grid_x-12}" y="{y+38}" font-size="12" fill="#333" text-anchor="end">Tier {t+1}</text>')
+    # Car outline
+    svg.append(f'<rect x="{x0}" y="{y0}" width="{car_w}" height="{car_h}" fill="none" stroke="#0b2a7a" stroke-width="4"/>')
 
+    # Wheels (simple)
+    wheel_y = y0 + car_h + 6
+    svg.append(f'<circle cx="{x0+car_w*0.22}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
+    svg.append(f'<circle cx="{x0+car_w*0.28}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
+    svg.append(f'<circle cx="{x0+car_w*0.72}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
+    svg.append(f'<circle cx="{x0+car_w*0.78}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
+
+    # Doorway overlay
+    svg.append(f'<rect x="{door_left}" y="{load_y}" width="{door_right-door_left}" height="{load_h}" fill="url(#doorHatch2)" stroke="#c00000" stroke-width="3"/>')
+    svg.append(f'<text x="{door_left+6}" y="{load_y-6}" font-size="12" fill="#c00000">Doorway</text>')
+
+    # Airbag band
+    svg.append(f'<rect x="{airbag_x}" y="{load_y}" width="{band_w}" height="{load_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
+
+    # Spot columns + tier blocks
     for spot in range(1, FLOOR_SPOTS + 1):
-        show_col = spot_belongs_to_side(spot, side_filter)
-        x = grid_x + (spot - 1) * cell_w
-        svg.append(f'<text x="{x + cell_w/2}" y="{grid_y + tiers*cell_h + 18}" font-size="12" fill="#333" text-anchor="middle">{spot}</text>')
+        x = load_x + (spot - 1) * cell_w
+
+        # Spot outline
+        svg.append(f'<rect x="{x}" y="{load_y}" width="{cell_w}" height="{load_h}" fill="none" stroke="#333" stroke-width="1" opacity="0.55"/>')
+
+        # Spot number at bottom
+        svg.append(f'<text x="{x + cell_w/2}" y="{load_y + load_h + 16}" font-size="12" text-anchor="middle" fill="#333">{spot}</text>')
 
         for t in range(tiers):
             pid = matrix[spot - 1][t]
-            display_row = tiers - 1 - t
-            y = grid_y + display_row * cell_h
+            if pid is None:
+                continue
 
-            fill = "#ffffff"
-            stroke = "#999"
-            opacity = 1.0 if show_col else 0.15
+            y = load_y + load_h - (t + 1) * cell_h
+            fill = color_for_pid(pid)
 
-            if pid and show_col:
-                fill = color_for_pid(pid)
-                stroke = "#333"
-                opacity = 0.95
+            svg.append(f'<rect x="{x+1}" y="{y+1}" width="{cell_w-2}" height="{cell_h-2}" fill="{fill}" stroke="#1a1a1a" stroke-width="1" opacity="0.95"/>')
 
-            svg.append(f'<rect x="{x}" y="{y}" width="{cell_w}" height="{cell_h}" fill="{fill}" stroke="{stroke}" stroke-width="1" opacity="{opacity}"/>')
+            hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
+            me = " ME" if (pid in products and products[pid].is_machine_edge) else ""
+            label = f"{pid}{hp}{me}"
+            svg.append(f'<text x="{x + cell_w/2}" y="{y + cell_h/2 + 4}" font-size="12" text-anchor="middle" fill="#0a0a0a">{label}</text>')
 
-            # Soft warning outline if halfpack on top tier
-            if show_col and pid and (t == top) and pid in products and products[pid].is_half_pack:
-                svg.append(f'<rect x="{x+2}" y="{y+2}" width="{cell_w-4}" height="{cell_h-4}" fill="none" stroke="#ff00aa" stroke-width="4" opacity="0.8"/>')
-
-            if pid and show_col:
-                hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
-                me = " ME" if (pid in products and products[pid].is_machine_edge) else ""
-                label = f"{pid}{hp}{me}"
-                svg.append(f'<text x="{x+4}" y="{y+18}" font-size="11" fill="#000">{label}</text>')
+    # Doorframe callouts on 6 & 9
+    for s in sorted(DOORFRAME_SPOTS_NO_MACHINE_EDGE):
+        x = load_x + (s - 1) * cell_w
+        svg.append(f'<rect x="{x+2}" y="{load_y+2}" width="{cell_w-4}" height="{load_h-4}" fill="none" stroke="#7a0000" stroke-width="4"/>')
+        svg.append(f'<text x="{x+cell_w/2}" y="{load_y+14}" font-size="11" text-anchor="middle" fill="#7a0000">NO ME</text>')
 
     svg.append("</svg>")
     return "\n".join(svg)
@@ -927,16 +907,15 @@ st.subheader("Summary")
 st.metric("Payload (lbs)", f"{payload:,.0f}")
 st.metric("Placed tiers", f"{placed:,} / {FLOOR_SPOTS*int(max_tiers):,}")
 
-# Soft violations: half pack on top
 top_half = count_top_halfpacks(matrix, products)
 if top_half > 0:
-    st.warning(f"Soft rule: {top_half} Half Pack(s) ended up on the TOP tier. (Allowed, but highlighted in pink.)")
+    st.warning(f"Soft rule: {top_half} Half Pack(s) ended up on the TOP tier (allowed).")
 
-# Hard violations: machine edge in 6/9
+# Hard rule check
 for spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
     for pid in matrix[spot - 1]:
         if pid and pid in products and products[pid].is_machine_edge:
-            st.error(f"HARD rule violation: Machine Edge SKU {pid} placed in doorframe Spot {spot} (not allowed).")
+            st.error(f"HARD violation: Machine Edge SKU {pid} placed in doorframe Spot {spot} (not allowed).")
 
 # Diagrams
 note = (
@@ -957,20 +936,24 @@ top_svg = render_top_svg(
     center_end=str(center_end),
 )
 
-side_a = render_side_grid_svg(
+side1 = render_side_loadxpert_svg(
     car_id=car_id,
     matrix=matrix,
     products=products,
-    side_name="Side A (Load-Xpert grid)",
-    side_filter="A",
+    title="Side 1 (Load Xpert style)",
+    airbag_gap_choice=airbag_gap_choice,
+    airbag_gap_in=float(airbag_gap_in),
+    unit_length_ref_in=float(unit_length_ref_in),
 )
 
-side_b = render_side_grid_svg(
+side2 = render_side_loadxpert_svg(
     car_id=car_id,
     matrix=matrix,
     products=products,
-    side_name="Side B (Load-Xpert grid)",
-    side_filter="B",
+    title="Side 2 (Load Xpert style)",
+    airbag_gap_choice=airbag_gap_choice,
+    airbag_gap_in=float(airbag_gap_in),
+    unit_length_ref_in=float(unit_length_ref_in),
 )
 
 st.subheader("Diagram View")
@@ -979,13 +962,13 @@ if view_mode == "Top only":
 elif view_mode == "Sides only":
     ca, cb = st.columns(2)
     with ca:
-        components.html(side_a, height=520, scrolling=False)
+        components.html(side1, height=440, scrolling=False)
     with cb:
-        components.html(side_b, height=520, scrolling=False)
+        components.html(side2, height=440, scrolling=False)
 else:
     components.html(top_svg, height=300, scrolling=False)
     ca, cb = st.columns(2)
     with ca:
-        components.html(side_a, height=520, scrolling=False)
+        components.html(side1, height=440, scrolling=False)
     with cb:
-        components.html(side_b, height=520, scrolling=False)
+        components.html(side2, height=440, scrolling=False)
