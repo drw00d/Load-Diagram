@@ -598,7 +598,7 @@ def render_top_svg(
 
 
 # =============================
-# Side view (Load-Xpert-ish) — UPDATED to avoid clipping
+# Side view (Load-Xpert-ish)
 # =============================
 def render_side_loadxpert_svg(
     *,
@@ -612,18 +612,15 @@ def render_side_loadxpert_svg(
 ) -> str:
     tiers = len(matrix[0]) if matrix else 0
 
-    # Keep SVG height generous, and keep all shapes inside it
     W = 1200
-    H = 440  # slightly taller than before to give header room
+    H = 440
     margin = 24
 
-    # Car drawing region
     x0 = margin
     y0 = margin + 64
     car_w = W - 2 * margin
-    car_h = H - y0 - margin - 10  # leave a small bottom buffer
+    car_h = H - y0 - margin - 10
 
-    # Inner load area
     pad = 18
     load_x = x0 + pad
     load_y = y0 + pad
@@ -633,15 +630,12 @@ def render_side_loadxpert_svg(
     cell_w = load_w / FLOOR_SPOTS
     cell_h = load_h / max(1, tiers)
 
-    # Airbag band width
     frac = 0.0 if unit_length_ref_in <= 0 else (float(airbag_gap_in) / float(unit_length_ref_in))
     band_w = max(8.0, min(cell_w * 0.9, cell_w * frac))
 
-    # Doorway bounds
     door_left = load_x + (DOOR_START_SPOT - 1) * cell_w
     door_right = load_x + DOOR_END_SPOT * cell_w
 
-    # Airbag center at boundary between a-b
     a, b = airbag_gap_choice
     airbag_x_center = load_x + a * cell_w
     airbag_x = airbag_x_center - band_w / 2
@@ -657,35 +651,26 @@ def render_side_loadxpert_svg(
     """)
     svg.append(f'<rect x="0" y="0" width="{W}" height="{H}" fill="white"/>')
 
-    # Header
     svg.append(f'<text x="{margin}" y="{margin+22}" font-size="18" font-weight="700">{title}</text>')
     svg.append(f'<text x="{margin}" y="{margin+44}" font-size="13" fill="#333">Car: {car_id} • Doorway {DOOR_START_SPOT}–{DOOR_END_SPOT} • Airbag {a}–{b} @ {airbag_gap_in:.1f}"</text>')
 
-    # Car outline
     svg.append(f'<rect x="{x0}" y="{y0}" width="{car_w}" height="{car_h}" fill="none" stroke="#0b2a7a" stroke-width="4"/>')
 
-    # Wheels — MOVED INSIDE the SVG/car area to prevent clipping
     wheel_y = y0 + car_h - 12
     svg.append(f'<circle cx="{x0+car_w*0.22}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
     svg.append(f'<circle cx="{x0+car_w*0.28}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
     svg.append(f'<circle cx="{x0+car_w*0.72}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
     svg.append(f'<circle cx="{x0+car_w*0.78}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
 
-    # Doorway overlay
     svg.append(f'<rect x="{door_left}" y="{load_y}" width="{door_right-door_left}" height="{load_h}" fill="url(#doorHatch2)" stroke="#c00000" stroke-width="3"/>')
     svg.append(f'<text x="{door_left+6}" y="{load_y-6}" font-size="12" fill="#c00000">Doorway</text>')
 
-    # Airbag band
     svg.append(f'<rect x="{airbag_x}" y="{load_y}" width="{band_w}" height="{load_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
 
-    # Spot columns + tier blocks
     for spot in range(1, FLOOR_SPOTS + 1):
         x = load_x + (spot - 1) * cell_w
 
-        # Spot outline
         svg.append(f'<rect x="{x}" y="{load_y}" width="{cell_w}" height="{load_h}" fill="none" stroke="#333" stroke-width="1" opacity="0.55"/>')
-
-        # Spot number at bottom
         svg.append(f'<text x="{x + cell_w/2}" y="{load_y + load_h + 16}" font-size="12" text-anchor="middle" fill="#333">{spot}</text>')
 
         for t in range(tiers):
@@ -706,7 +691,6 @@ def render_side_loadxpert_svg(
             label = f"{pid}{hp}{me}"
             svg.append(f'<text x="{x + cell_w/2}" y="{y + cell_h/2 + 4}" font-size="12" text-anchor="middle" fill="#0a0a0a">{label}</text>')
 
-    # Doorframe callouts on 6 & 9
     for s in sorted(DOORFRAME_SPOTS_NO_MACHINE_EDGE):
         x = load_x + (s - 1) * cell_w
         svg.append(f'<rect x="{x+2}" y="{load_y+2}" width="{cell_w-4}" height="{load_h-4}" fill="none" stroke="#7a0000" stroke-width="4"/>')
@@ -804,7 +788,6 @@ if search.strip():
         | (pm_cf[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_cf.columns else False)
     ].copy()
 
-# Sort + dedupe
 sort_cols, ascending = [], []
 if COL_THICK in pm_cf.columns:
     sort_cols.append(COL_THICK); ascending.append(False)
@@ -863,19 +846,31 @@ if add_line and selected_label:
     st.session_state.requests.append(RequestLine(product_id=pid, tiers=int(tiers_to_add)))
 
 st.subheader("Requested SKUs (tiers)")
-if st.session_state.requests:
-    req_df = pd.DataFrame([{"Sales Product Id": r.product_id, "Tiers": r.tiers} for r in st.session_state.requests])
-    st.dataframe(req_df, use_container_width=True, height=200)
-else:
-    st.info("Add one or more SKU lines, then click **Optimize Layout**.")
 
-# Build products dict
+# Build products dict (so we can show descriptions here)
 products: Dict[str, Product] = {}
 for r in st.session_state.requests:
     try:
         products[r.product_id] = lookup_product(pm, r.product_id)
     except Exception as e:
         st.error(f"Could not lookup SKU {r.product_id}: {e}")
+
+# ✅ UPDATED: add Description column in the Requested SKUs table
+if st.session_state.requests:
+    req_rows = []
+    for r in st.session_state.requests:
+        p = products.get(r.product_id)
+        req_rows.append(
+            {
+                "Sales Product Id": r.product_id,
+                "Description": (p.description if p else ""),
+                "Tiers": r.tiers,
+            }
+        )
+    req_df = pd.DataFrame(req_rows)
+    st.dataframe(req_df, use_container_width=True, height=200)
+else:
+    st.info("Add one or more SKU lines, then click **Optimize Layout**.")
 
 messages: List[str] = []
 if optimize_btn:
@@ -915,13 +910,11 @@ top_half = count_top_halfpacks(matrix, products)
 if top_half > 0:
     st.warning(f"Soft rule: {top_half} Half Pack(s) ended up on the TOP tier (allowed).")
 
-# Hard rule check
 for spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
     for pid in matrix[spot - 1]:
         if pid and pid in products and products[pid].is_machine_edge:
             st.error(f"HARD violation: Machine Edge SKU {pid} placed in doorframe Spot {spot} (not allowed).")
 
-# Diagrams
 note = (
     f"Commodity: {commodity_selected} | Facility: {facility_selected} | "
     f"Doorway: {DOOR_START_SPOT}–{DOOR_END_SPOT} (no stagger) | "
@@ -962,7 +955,6 @@ side2 = render_side_loadxpert_svg(
 
 st.subheader("Diagram View")
 
-# IMPORTANT: give the iframe enough height so Streamlit doesn't clip the SVG
 SIDE_IFRAME_HEIGHT = 560
 
 if view_mode == "Top only":
