@@ -154,7 +154,6 @@ def outside_doorway_spots() -> List[int]:
 
 
 def center_out_order_outside() -> List[int]:
-    # Outside doorway (1–5, 10–15) arranged to keep center-ish columns filled early
     left = [5, 4, 3, 2, 1]
     right = [10, 11, 12, 13, 14, 15]
     order: List[int] = []
@@ -167,7 +166,6 @@ def center_out_order_outside() -> List[int]:
 
 
 def doorway_fill_order() -> List[int]:
-    # Prefer PIN zone 7/8 first, then doorframe 6/9
     return [7, 8, 6, 9]
 
 
@@ -198,7 +196,6 @@ def can_place_pid_hard(products: Dict[str, Product], pid: str, spot: int) -> Tup
 
 
 def soft_penalty(products: Dict[str, Product], pid: str, tier_idx: int, max_tiers: int) -> int:
-    # Soft preference: avoid half pack on top, but allow if needed
     p = products[pid]
     penalty = 0
     if p.is_half_pack and tier_idx == (max_tiers - 1):
@@ -256,8 +253,6 @@ def find_spot_for_pid_with_pins(
     base_order: List[int],
 ) -> Optional[int]:
     p = products[pid]
-
-    # Machine Edge prefers 7/8 (door pocket)
     if p.is_machine_edge:
         for s in [7, 8]:
             if not spot_has_capacity(matrix, s):
@@ -294,9 +289,6 @@ def count_top_halfpacks(matrix: List[List[Optional[str]]], products: Dict[str, P
 
 
 def repair_reduce_top_halfpacks(matrix: List[List[Optional[str]]], products: Dict[str, Product]) -> int:
-    """
-    Swap repair pass to reduce half packs on TOP tier (soft rule).
-    """
     if not matrix:
         return 0
     top = len(matrix[0]) - 1
@@ -315,7 +307,6 @@ def repair_reduce_top_halfpacks(matrix: List[List[Optional[str]]], products: Dic
         if not hp_pid:
             continue
 
-        # Swap within same spot if possible
         for t in range(top - 1, -1, -1):
             below = matrix[spot - 1][t]
             if not is_full(below):
@@ -330,7 +321,6 @@ def repair_reduce_top_halfpacks(matrix: List[List[Optional[str]]], products: Dic
         if hp_pid is None:
             continue
 
-        # Swap with another spot's full below-top
         swapped = False
         for other_spot in range(1, FLOOR_SPOTS + 1):
             if other_spot == spot:
@@ -378,7 +368,6 @@ def optimize_layout(
         return "heavy" if (tier_idx % 2 == 0) else "light"
 
     while (heavy or light) and any(spot_has_capacity(matrix, s) for s in range(1, FLOOR_SPOTS + 1)):
-        # pick least-filled spot
         best_spot = None
         best_fill = None
         for s in base_order:
@@ -429,7 +418,6 @@ def optimize_layout(
                 msgs.append(f"Could not place any remaining tiers at Tier {tier_idx+1} due to constraints/capacity.")
                 break
 
-        # PIN placement for machine edge
         pinned = find_spot_for_pid_with_pins(matrix, products, pid, tier_idx, base_order)
         if pinned is not None:
             best_spot = pinned
@@ -445,7 +433,6 @@ def optimize_layout(
     if remaining > 0:
         msgs.append(f"{remaining} tiers could not be placed (capacity/rules).")
 
-    # Repair pass (soft)
     before = count_top_halfpacks(matrix, products)
     swaps = repair_reduce_top_halfpacks(matrix, products)
     after = count_top_halfpacks(matrix, products)
@@ -481,6 +468,16 @@ def doorway_bounds_px(x0: float, cell_w: float) -> Tuple[float, float]:
 def airbag_center_px(x0: float, cell_w: float, gap_choice: Tuple[int, int]) -> float:
     a, _ = gap_choice
     return x0 + a * cell_w
+
+
+def components_svg(svg: str, height: int) -> None:
+    # Responsive wrapper so SVG scales instead of cropping inside Streamlit columns.
+    html = f"""
+    <div style="width:100%; overflow: visible;">
+      {svg}
+    </div>
+    """
+    components.html(html, height=height, scrolling=False)
 
 
 # =============================
@@ -598,7 +595,7 @@ def render_top_svg(
 
 
 # =============================
-# Side view (Load-Xpert-ish)
+# Side view (Load-Xpert-ish) - FIXED to show all 15 spots
 # =============================
 def render_side_loadxpert_svg(
     *,
@@ -612,7 +609,8 @@ def render_side_loadxpert_svg(
 ) -> str:
     tiers = len(matrix[0]) if matrix else 0
 
-    W = 1200
+    # Make the SVG responsive: width 100%, viewBox defines full drawing area.
+    W = 1400  # a little wider so 15 spots are comfortably readable
     H = 440
     margin = 24
 
@@ -641,7 +639,10 @@ def render_side_loadxpert_svg(
     airbag_x = airbag_x_center - band_w / 2
 
     svg = []
-    svg.append(f'<svg width="{W}" height="{H}" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg">')
+    svg.append(
+        f'<svg width="100%" height="{H}" viewBox="0 0 {W} {H}" '
+        f'preserveAspectRatio="xMinYMin meet" xmlns="http://www.w3.org/2000/svg">'
+    )
     svg.append("""
     <defs>
       <pattern id="doorHatch2" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
@@ -667,9 +668,9 @@ def render_side_loadxpert_svg(
 
     svg.append(f'<rect x="{airbag_x}" y="{load_y}" width="{band_w}" height="{load_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
 
+    # 15-column grid + labels 1..15
     for spot in range(1, FLOOR_SPOTS + 1):
         x = load_x + (spot - 1) * cell_w
-
         svg.append(f'<rect x="{x}" y="{load_y}" width="{cell_w}" height="{load_h}" fill="none" stroke="#333" stroke-width="1" opacity="0.55"/>')
         svg.append(f'<text x="{x + cell_w/2}" y="{load_y + load_h + 16}" font-size="12" text-anchor="middle" fill="#333">{spot}</text>')
 
@@ -847,7 +848,6 @@ if add_line and selected_label:
 
 st.subheader("Requested SKUs (tiers)")
 
-# Build products dict (so we can show descriptions here)
 products: Dict[str, Product] = {}
 for r in st.session_state.requests:
     try:
@@ -855,7 +855,6 @@ for r in st.session_state.requests:
     except Exception as e:
         st.error(f"Could not lookup SKU {r.product_id}: {e}")
 
-# ✅ UPDATED: add Description column in the Requested SKUs table
 if st.session_state.requests:
     req_rows = []
     for r in st.session_state.requests:
@@ -892,7 +891,6 @@ for m in messages:
 
 matrix = st.session_state.matrix
 
-# Summary
 payload = 0.0
 placed = 0
 for spot in range(1, FLOOR_SPOTS + 1):
@@ -955,20 +953,20 @@ side2 = render_side_loadxpert_svg(
 
 st.subheader("Diagram View")
 
-SIDE_IFRAME_HEIGHT = 560
+SIDE_IFRAME_HEIGHT = 520
 
 if view_mode == "Top only":
-    components.html(top_svg, height=320, scrolling=False)
+    components_svg(top_svg, height=320)
 elif view_mode == "Sides only":
     ca, cb = st.columns(2)
     with ca:
-        components.html(side1, height=SIDE_IFRAME_HEIGHT, scrolling=False)
+        components_svg(side1, height=SIDE_IFRAME_HEIGHT)
     with cb:
-        components.html(side2, height=SIDE_IFRAME_HEIGHT, scrolling=False)
+        components_svg(side2, height=SIDE_IFRAME_HEIGHT)
 else:
-    components.html(top_svg, height=320, scrolling=False)
+    components_svg(top_svg, height=320)
     ca, cb = st.columns(2)
     with ca:
-        components.html(side1, height=SIDE_IFRAME_HEIGHT, scrolling=False)
+        components_svg(side1, height=SIDE_IFRAME_HEIGHT)
     with cb:
-        components.html(side2, height=SIDE_IFRAME_HEIGHT, scrolling=False)
+        components_svg(side2, height=SIDE_IFRAME_HEIGHT)
