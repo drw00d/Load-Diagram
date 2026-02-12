@@ -479,8 +479,22 @@ def components_svg(svg: str, height: int) -> None:
     components.html(html, height=height, scrolling=False)
 
 
+def auto_airbag_choice(matrix: List[List[Optional[str]]]) -> Tuple[Tuple[int, int], float]:
+    """
+    Heuristic:
+    - Prefer airbag between 7–8 (most common)
+    - Otherwise 8–9, then 6–7
+    - Gap inches: choose smallest (6") by default; never above 9".
+    """
+    preferred = [(7, 8), (8, 9), (6, 7)]
+    for g in preferred:
+        if g in AIRBAG_ALLOWED_GAPS:
+            return g, 6.0
+    return AIRBAG_ALLOWED_GAPS[1], 6.0
+
+
 # =============================
-# Top view (stagger outside doorway only)
+# Top view (stagger outside doorway only) + forklift turn spot rendering
 # =============================
 def render_top_svg(
     *,
@@ -492,10 +506,11 @@ def render_top_svg(
     airbag_gap_choice: Tuple[int, int],
     unit_length_ref_in: float,
     center_end: str,
+    forklift_turn_spot: Optional[int],
 ) -> str:
-    W, H = 1200, 280
+    W, H = 1200, 300
     margin = 30
-    header_h = 70
+    header_h = 74
 
     x0, y0 = margin, margin + header_h
     w = W - 2 * margin
@@ -524,11 +539,14 @@ def render_top_svg(
       <pattern id="doorHatch" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
         <line x1="0" y1="0" x2="0" y2="8" stroke="#c00000" stroke-width="2" opacity="0.35"/>
       </pattern>
+      <pattern id="turnHatch" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="8" stroke="#333" stroke-width="2" opacity="0.18"/>
+      </pattern>
     </defs>
     """)
     svg.append(f'<rect x="{margin}" y="{margin}" width="{W-2*margin}" height="{H-2*margin}" fill="white" stroke="black" stroke-width="2"/>')
     svg.append(f'<text x="{margin+8}" y="{margin+26}" font-size="18" font-weight="600">Car: {car_id} — Top View</text>')
-    svg.append(f'<text x="{margin+8}" y="{margin+50}" font-size="13">{note}</text>')
+    svg.append(f'<text x="{margin+8}" y="{margin+52}" font-size="13">{note}</text>')
 
     door_left, door_right = doorway_bounds_px(x0, cell_w)
     svg.append(f'<rect x="{door_left}" y="{y0}" width="{door_right-door_left}" height="{lane_h}" fill="url(#doorHatch)" stroke="#c00000" stroke-width="3" opacity="0.9"/>')
@@ -538,6 +556,12 @@ def render_top_svg(
     band_x = center_x - band_w / 2
     svg.append(f'<rect x="{band_x}" y="{y0}" width="{band_w}" height="{lane_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
     svg.append(f'<text x="{band_x+4}" y="{y0+lane_h+16}" font-size="12" fill="#d00000">Airbag {airbag_gap_in:.1f}" between {airbag_gap_choice[0]}–{airbag_gap_choice[1]}</text>')
+
+    # Forklift turn spot highlight
+    if forklift_turn_spot is not None:
+        tx = x0 + (forklift_turn_spot - 1) * cell_w
+        svg.append(f'<rect x="{tx}" y="{y0}" width="{cell_w}" height="{lane_h}" fill="url(#turnHatch)" stroke="#333" stroke-width="2" opacity="0.9"/>')
+        svg.append(f'<text x="{tx + cell_w/2}" y="{y0 + 16}" font-size="12" text-anchor="middle" fill="#333">FORKLIFT TURN</text>')
 
     for i in range(FLOOR_SPOTS):
         spot = i + 1
@@ -561,9 +585,15 @@ def render_top_svg(
         rep = next((pid for pid in col if pid is not None), None)
         fill = "#ffffff" if rep is None else color_for_pid(rep)
 
-        svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="{fill}" opacity="0.75" stroke="#333" stroke-width="1"/>')
+        # Turn spot: draw a "rotated" looking unit box (shorter height + label rotated)
+        is_turn = (forklift_turn_spot is not None and spot == forklift_turn_spot)
+        draw_h = box_h * (0.62 if is_turn else 1.0)
+        draw_y = y + (box_h - draw_h) / 2
+
+        svg.append(f'<rect x="{x}" y="{draw_y}" width="{bw}" height="{draw_h}" fill="{fill}" opacity="0.75" stroke="#333" stroke-width="1"/>')
+
         label = f"{spot}{side_tag}" if side_tag else f"{spot}"
-        svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{label}</text>')
+        svg.append(f'<text x="{x+6}" y="{draw_y+16}" font-size="12" fill="#333">{label}</text>')
 
         counts: Dict[str, int] = {}
         for pid in col:
@@ -577,17 +607,21 @@ def render_top_svg(
 
             for li, (pid, cnt) in enumerate(items[:2]):
                 hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
-                svg.append(f'<text x="{x+6}" y="{y+44 + li*16}" font-size="12" fill="#000">{pid}{hp} x{cnt}</text>')
+                svg.append(f'<text x="{x+6}" y="{draw_y+44 + li*16}" font-size="12" fill="#000">{pid}{hp} x{cnt}</text>')
             if len(items) > 2:
-                svg.append(f'<text x="{x+6}" y="{y+44 + 2*16}" font-size="12" fill="#000">+{len(items)-2} more</text>')
+                svg.append(f'<text x="{x+6}" y="{draw_y+44 + 2*16}" font-size="12" fill="#000">+{len(items)-2} more</text>')
 
         if spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
-            svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#7a0000" stroke-width="3"/>')
-            svg.append(f'<text x="{x+6}" y="{y+box_h-8}" font-size="11" fill="#7a0000">NO Machine Edge</text>')
+            svg.append(f'<rect x="{x}" y="{draw_y}" width="{bw}" height="{draw_h}" fill="none" stroke="#7a0000" stroke-width="3"/>')
+            svg.append(f'<text x="{x+6}" y="{draw_y+draw_h-8}" font-size="11" fill="#7a0000">NO Machine Edge</text>')
 
         top_pid = col[top_idx] if col and top_idx < len(col) else None
         if top_pid and top_pid in products and products[top_pid].is_half_pack:
-            svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#ff00aa" stroke-width="4" opacity="0.8"/>')
+            svg.append(f'<rect x="{x}" y="{draw_y}" width="{bw}" height="{draw_h}" fill="none" stroke="#ff00aa" stroke-width="4" opacity="0.8"/>')
+
+        if is_turn:
+            # rotated text cue (visual only)
+            svg.append(f'<text x="{x+bw-10}" y="{draw_y+draw_h/2}" font-size="12" fill="#111" transform="rotate(-90 {x+bw-10} {draw_y+draw_h/2})">TURN</text>')
 
     svg.append("</svg>")
     return "\n".join(svg)
@@ -605,16 +639,16 @@ def render_side_loadxpert_svg(
     airbag_gap_choice: Tuple[int, int],
     airbag_gap_in: float,
     unit_length_ref_in: float,
+    forklift_turn_spot: Optional[int],
 ) -> str:
     tiers = len(matrix[0]) if matrix else 0
 
-    # Bigger base canvas; will scale to container width.
     W = 1700
-    H = 520
+    H = 540
     margin = 24
 
     x0 = margin
-    y0 = margin + 72
+    y0 = margin + 74
     car_w = W - 2 * margin
     car_h = H - y0 - margin - 10
 
@@ -647,12 +681,19 @@ def render_side_loadxpert_svg(
       <pattern id="doorHatch2" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
         <line x1="0" y1="0" x2="0" y2="10" stroke="#c00000" stroke-width="2" opacity="0.25"/>
       </pattern>
+      <pattern id="turnHatch2" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="10" stroke="#111" stroke-width="2" opacity="0.14"/>
+      </pattern>
     </defs>
     """)
     svg.append(f'<rect x="0" y="0" width="{W}" height="{H}" fill="white"/>')
 
+    subtitle = f"Car: {car_id} • Doorway {DOOR_START_SPOT}–{DOOR_END_SPOT} • Airbag {a}–{b} @ {airbag_gap_in:.1f}\""
+    if forklift_turn_spot is not None:
+        subtitle += f" • Turn spot: {forklift_turn_spot}"
+
     svg.append(f'<text x="{margin}" y="{margin+26}" font-size="20" font-weight="700">{title}</text>')
-    svg.append(f'<text x="{margin}" y="{margin+52}" font-size="14" fill="#333">Car: {car_id} • Doorway {DOOR_START_SPOT}–{DOOR_END_SPOT} • Airbag {a}–{b} @ {airbag_gap_in:.1f}"</text>')
+    svg.append(f'<text x="{margin}" y="{margin+52}" font-size="14" fill="#333">{subtitle}</text>')
 
     svg.append(f'<rect x="{x0}" y="{y0}" width="{car_w}" height="{car_h}" fill="none" stroke="#0b2a7a" stroke-width="4"/>')
 
@@ -666,6 +707,12 @@ def render_side_loadxpert_svg(
     svg.append(f'<text x="{door_left+6}" y="{load_y-6}" font-size="12" fill="#c00000">Doorway</text>')
 
     svg.append(f'<rect x="{airbag_x}" y="{load_y}" width="{band_w}" height="{load_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
+
+    # Turn spot highlight (visual cue on side too)
+    if forklift_turn_spot is not None:
+        tx = load_x + (forklift_turn_spot - 1) * cell_w
+        svg.append(f'<rect x="{tx}" y="{load_y}" width="{cell_w}" height="{load_h}" fill="url(#turnHatch2)" stroke="#111" stroke-width="2" opacity="0.9"/>')
+        svg.append(f'<text x="{tx + cell_w/2}" y="{load_y + 16}" font-size="12" text-anchor="middle" fill="#111">TURN</text>')
 
     # 15 columns + tier blocks
     for spot in range(1, FLOOR_SPOTS + 1):
@@ -732,10 +779,18 @@ with st.sidebar:
 
     st.divider()
     st.header("Doorway / Airbag")
+    auto_airbag = st.checkbox("Auto airbag (prefer <= 9\")", value=True)
+
     gap_labels = [f"{a}–{b}" for a, b in AIRBAG_ALLOWED_GAPS]
-    gap_choice_label = st.selectbox("Airbag location (within doorway)", gap_labels, index=1)
-    airbag_gap_in = st.slider("Airbag gap (in)", 6.0, 9.0, 9.0, 0.5)
+    gap_choice_label = st.selectbox("Airbag location (manual)", gap_labels, index=1, disabled=auto_airbag)
+    airbag_gap_in = st.slider("Airbag gap (in) (manual)", 6.0, 9.0, 9.0, 0.5, disabled=auto_airbag)
+
     unit_length_ref_in = st.number_input("Unit length ref (in) for gap drawing", min_value=1.0, value=96.0, step=1.0)
+
+    st.divider()
+    st.header("Forklift turn")
+    forklift_turn_spot_label = st.selectbox("Turn (horizontal) spot", ["None", "7", "8"], index=1)
+    forklift_turn_spot = None if forklift_turn_spot_label == "None" else int(forklift_turn_spot_label)
 
     st.divider()
     st.header("Balancing preferences")
@@ -744,8 +799,6 @@ with st.sidebar:
 
     st.divider()
     view_mode = st.radio("View", ["Top + Both Sides", "Top only", "Sides only"], index=0)
-
-airbag_gap_choice = AIRBAG_ALLOWED_GAPS[gap_labels.index(gap_choice_label)]
 
 
 # =============================
@@ -890,6 +943,13 @@ for m in messages:
 
 matrix = st.session_state.matrix
 
+# Auto airbag after we have matrix (if enabled)
+if auto_airbag:
+    airbag_gap_choice, airbag_gap_in = auto_airbag_choice(matrix)
+else:
+    airbag_gap_choice = AIRBAG_ALLOWED_GAPS[[f"{a}–{b}" for a, b in AIRBAG_ALLOWED_GAPS].index(gap_choice_label)]
+
+
 payload = 0.0
 placed = 0
 for spot in range(1, FLOOR_SPOTS + 1):
@@ -915,9 +975,11 @@ for spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
 note = (
     f"Commodity: {commodity_selected} | Facility: {facility_selected} | "
     f"Doorway: {DOOR_START_SPOT}–{DOOR_END_SPOT} (no stagger) | "
-    f"Airbag: {gap_choice_label} @ {airbag_gap_in:.1f}\" | "
+    f"Airbag: {airbag_gap_choice[0]}–{airbag_gap_choice[1]} @ {float(airbag_gap_in):.1f}\" | "
     f"PIN: Machine Edge prefers 7/8 | Half Pack top = soft"
 )
+if forklift_turn_spot is not None:
+    note += f" | Forklift turn spot: {forklift_turn_spot}"
 
 top_svg = render_top_svg(
     car_id=car_id,
@@ -928,6 +990,7 @@ top_svg = render_top_svg(
     airbag_gap_choice=airbag_gap_choice,
     unit_length_ref_in=float(unit_length_ref_in),
     center_end=str(center_end),
+    forklift_turn_spot=forklift_turn_spot,
 )
 
 side1 = render_side_loadxpert_svg(
@@ -938,6 +1001,7 @@ side1 = render_side_loadxpert_svg(
     airbag_gap_choice=airbag_gap_choice,
     airbag_gap_in=float(airbag_gap_in),
     unit_length_ref_in=float(unit_length_ref_in),
+    forklift_turn_spot=forklift_turn_spot,
 )
 
 side2 = render_side_loadxpert_svg(
@@ -948,28 +1012,23 @@ side2 = render_side_loadxpert_svg(
     airbag_gap_choice=airbag_gap_choice,
     airbag_gap_in=float(airbag_gap_in),
     unit_length_ref_in=float(unit_length_ref_in),
+    forklift_turn_spot=forklift_turn_spot,
 )
 
 st.subheader("Diagram View")
 
-# These heights are for Streamlit iframe; bigger = more readable
-TOP_HEIGHT = 320
-SIDE_HEIGHT = 560
+TOP_HEIGHT = 330
+SIDE_HEIGHT = 575
 
 if view_mode == "Top only":
     components_svg(top_svg, height=TOP_HEIGHT)
-
 elif view_mode == "Sides only":
-    # STACKED (full width)
     components_svg(side1, height=SIDE_HEIGHT)
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     components_svg(side2, height=SIDE_HEIGHT)
-
 else:
     components_svg(top_svg, height=TOP_HEIGHT)
     st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-
-    # STACKED (full width)
     components_svg(side1, height=SIDE_HEIGHT)
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     components_svg(side2, height=SIDE_HEIGHT)
