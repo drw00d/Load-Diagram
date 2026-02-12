@@ -471,7 +471,6 @@ def airbag_center_px(x0: float, cell_w: float, gap_choice: Tuple[int, int]) -> f
 
 
 def components_svg(svg: str, height: int) -> None:
-    # Responsive wrapper so SVG scales instead of cropping inside Streamlit columns.
     html = f"""
     <div style="width:100%; overflow: visible;">
       {svg}
@@ -595,7 +594,7 @@ def render_top_svg(
 
 
 # =============================
-# Side view (Load-Xpert-ish) - FIXED to show all 15 spots
+# Side view (Load-Xpert-ish) - responsive and bigger
 # =============================
 def render_side_loadxpert_svg(
     *,
@@ -609,17 +608,17 @@ def render_side_loadxpert_svg(
 ) -> str:
     tiers = len(matrix[0]) if matrix else 0
 
-    # Make the SVG responsive: width 100%, viewBox defines full drawing area.
-    W = 1400  # a little wider so 15 spots are comfortably readable
-    H = 440
+    # Bigger base canvas; will scale to container width.
+    W = 1700
+    H = 520
     margin = 24
 
     x0 = margin
-    y0 = margin + 64
+    y0 = margin + 72
     car_w = W - 2 * margin
     car_h = H - y0 - margin - 10
 
-    pad = 18
+    pad = 22
     load_x = x0 + pad
     load_y = y0 + pad
     load_w = car_w - 2 * pad
@@ -652,8 +651,8 @@ def render_side_loadxpert_svg(
     """)
     svg.append(f'<rect x="0" y="0" width="{W}" height="{H}" fill="white"/>')
 
-    svg.append(f'<text x="{margin}" y="{margin+22}" font-size="18" font-weight="700">{title}</text>')
-    svg.append(f'<text x="{margin}" y="{margin+44}" font-size="13" fill="#333">Car: {car_id} • Doorway {DOOR_START_SPOT}–{DOOR_END_SPOT} • Airbag {a}–{b} @ {airbag_gap_in:.1f}"</text>')
+    svg.append(f'<text x="{margin}" y="{margin+26}" font-size="20" font-weight="700">{title}</text>')
+    svg.append(f'<text x="{margin}" y="{margin+52}" font-size="14" fill="#333">Car: {car_id} • Doorway {DOOR_START_SPOT}–{DOOR_END_SPOT} • Airbag {a}–{b} @ {airbag_gap_in:.1f}"</text>')
 
     svg.append(f'<rect x="{x0}" y="{y0}" width="{car_w}" height="{car_h}" fill="none" stroke="#0b2a7a" stroke-width="4"/>')
 
@@ -668,11 +667,11 @@ def render_side_loadxpert_svg(
 
     svg.append(f'<rect x="{airbag_x}" y="{load_y}" width="{band_w}" height="{load_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
 
-    # 15-column grid + labels 1..15
+    # 15 columns + tier blocks
     for spot in range(1, FLOOR_SPOTS + 1):
         x = load_x + (spot - 1) * cell_w
         svg.append(f'<rect x="{x}" y="{load_y}" width="{cell_w}" height="{load_h}" fill="none" stroke="#333" stroke-width="1" opacity="0.55"/>')
-        svg.append(f'<text x="{x + cell_w/2}" y="{load_y + load_h + 16}" font-size="12" text-anchor="middle" fill="#333">{spot}</text>')
+        svg.append(f'<text x="{x + cell_w/2}" y="{load_y + load_h + 18}" font-size="12" text-anchor="middle" fill="#333">{spot}</text>')
 
         for t in range(tiers):
             pid = matrix[spot - 1][t]
@@ -690,12 +689,12 @@ def render_side_loadxpert_svg(
             hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
             me = " ME" if (pid in products and products[pid].is_machine_edge) else ""
             label = f"{pid}{hp}{me}"
-            svg.append(f'<text x="{x + cell_w/2}" y="{y + cell_h/2 + 4}" font-size="12" text-anchor="middle" fill="#0a0a0a">{label}</text>')
+            svg.append(f'<text x="{x + cell_w/2}" y="{y + cell_h/2 + 5}" font-size="13" text-anchor="middle" fill="#0a0a0a">{label}</text>')
 
     for s in sorted(DOORFRAME_SPOTS_NO_MACHINE_EDGE):
         x = load_x + (s - 1) * cell_w
         svg.append(f'<rect x="{x+2}" y="{load_y+2}" width="{cell_w-4}" height="{load_h-4}" fill="none" stroke="#7a0000" stroke-width="4"/>')
-        svg.append(f'<text x="{x+cell_w/2}" y="{load_y+14}" font-size="11" text-anchor="middle" fill="#7a0000">NO ME</text>')
+        svg.append(f'<text x="{x+cell_w/2}" y="{load_y+16}" font-size="11" text-anchor="middle" fill="#7a0000">NO ME</text>')
 
     svg.append("</svg>")
     return "\n".join(svg)
@@ -953,20 +952,24 @@ side2 = render_side_loadxpert_svg(
 
 st.subheader("Diagram View")
 
-SIDE_IFRAME_HEIGHT = 520
+# These heights are for Streamlit iframe; bigger = more readable
+TOP_HEIGHT = 320
+SIDE_HEIGHT = 560
 
 if view_mode == "Top only":
-    components_svg(top_svg, height=320)
+    components_svg(top_svg, height=TOP_HEIGHT)
+
 elif view_mode == "Sides only":
-    ca, cb = st.columns(2)
-    with ca:
-        components_svg(side1, height=SIDE_IFRAME_HEIGHT)
-    with cb:
-        components_svg(side2, height=SIDE_IFRAME_HEIGHT)
+    # STACKED (full width)
+    components_svg(side1, height=SIDE_HEIGHT)
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    components_svg(side2, height=SIDE_HEIGHT)
+
 else:
-    components_svg(top_svg, height=320)
-    ca, cb = st.columns(2)
-    with ca:
-        components_svg(side1, height=SIDE_IFRAME_HEIGHT)
-    with cb:
-        components_svg(side2, height=SIDE_IFRAME_HEIGHT)
+    components_svg(top_svg, height=TOP_HEIGHT)
+    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+    # STACKED (full width)
+    components_svg(side1, height=SIDE_HEIGHT)
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    components_svg(side2, height=SIDE_HEIGHT)
