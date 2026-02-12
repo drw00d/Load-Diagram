@@ -154,6 +154,7 @@ def outside_doorway_spots() -> List[int]:
 
 
 def center_out_order_outside() -> List[int]:
+    # Outside doorway (1–5, 10–15) arranged to keep center-ish columns filled early
     left = [5, 4, 3, 2, 1]
     right = [10, 11, 12, 13, 14, 15]
     order: List[int] = []
@@ -584,12 +585,10 @@ def render_top_svg(
             if len(items) > 2:
                 svg.append(f'<text x="{x+6}" y="{y+44 + 2*16}" font-size="12" fill="#000">+{len(items)-2} more</text>')
 
-        # Doorframe visual warning
         if spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
             svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#7a0000" stroke-width="3"/>')
             svg.append(f'<text x="{x+6}" y="{y+box_h-8}" font-size="11" fill="#7a0000">NO Machine Edge</text>')
 
-        # Soft warning outline: half pack on top
         top_pid = col[top_idx] if col and top_idx < len(col) else None
         if top_pid and top_pid in products and products[top_pid].is_half_pack:
             svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#ff00aa" stroke-width="4" opacity="0.8"/>')
@@ -599,7 +598,7 @@ def render_top_svg(
 
 
 # =============================
-# NEW Side view (Load-Xpert-ish)
+# Side view (Load-Xpert-ish) — UPDATED to avoid clipping
 # =============================
 def render_side_loadxpert_svg(
     *,
@@ -612,15 +611,17 @@ def render_side_loadxpert_svg(
     unit_length_ref_in: float,
 ) -> str:
     tiers = len(matrix[0]) if matrix else 0
+
+    # Keep SVG height generous, and keep all shapes inside it
     W = 1200
-    H = 420
+    H = 440  # slightly taller than before to give header room
     margin = 24
 
     # Car drawing region
     x0 = margin
-    y0 = margin + 60
+    y0 = margin + 64
     car_w = W - 2 * margin
-    car_h = H - y0 - margin
+    car_h = H - y0 - margin - 10  # leave a small bottom buffer
 
     # Inner load area
     pad = 18
@@ -646,7 +647,7 @@ def render_side_loadxpert_svg(
     airbag_x = airbag_x_center - band_w / 2
 
     svg = []
-    svg.append(f'<svg width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">')
+    svg.append(f'<svg width="{W}" height="{H}" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg">')
     svg.append("""
     <defs>
       <pattern id="doorHatch2" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
@@ -663,8 +664,8 @@ def render_side_loadxpert_svg(
     # Car outline
     svg.append(f'<rect x="{x0}" y="{y0}" width="{car_w}" height="{car_h}" fill="none" stroke="#0b2a7a" stroke-width="4"/>')
 
-    # Wheels (simple)
-    wheel_y = y0 + car_h + 6
+    # Wheels — MOVED INSIDE the SVG/car area to prevent clipping
+    wheel_y = y0 + car_h - 12
     svg.append(f'<circle cx="{x0+car_w*0.22}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
     svg.append(f'<circle cx="{x0+car_w*0.28}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
     svg.append(f'<circle cx="{x0+car_w*0.72}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
@@ -695,7 +696,10 @@ def render_side_loadxpert_svg(
             y = load_y + load_h - (t + 1) * cell_h
             fill = color_for_pid(pid)
 
-            svg.append(f'<rect x="{x+1}" y="{y+1}" width="{cell_w-2}" height="{cell_h-2}" fill="{fill}" stroke="#1a1a1a" stroke-width="1" opacity="0.95"/>')
+            svg.append(
+                f'<rect x="{x+1}" y="{y+1}" width="{cell_w-2}" height="{cell_h-2}" '
+                f'fill="{fill}" stroke="#1a1a1a" stroke-width="1" opacity="0.95"/>'
+            )
 
             hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
             me = " ME" if (pid in products and products[pid].is_machine_edge) else ""
@@ -957,18 +961,22 @@ side2 = render_side_loadxpert_svg(
 )
 
 st.subheader("Diagram View")
+
+# IMPORTANT: give the iframe enough height so Streamlit doesn't clip the SVG
+SIDE_IFRAME_HEIGHT = 560
+
 if view_mode == "Top only":
-    components.html(top_svg, height=300, scrolling=False)
+    components.html(top_svg, height=320, scrolling=False)
 elif view_mode == "Sides only":
     ca, cb = st.columns(2)
     with ca:
-        components.html(side1, height=440, scrolling=False)
+        components.html(side1, height=SIDE_IFRAME_HEIGHT, scrolling=False)
     with cb:
-        components.html(side2, height=440, scrolling=False)
+        components.html(side2, height=SIDE_IFRAME_HEIGHT, scrolling=False)
 else:
-    components.html(top_svg, height=300, scrolling=False)
+    components.html(top_svg, height=320, scrolling=False)
     ca, cb = st.columns(2)
     with ca:
-        components.html(side1, height=440, scrolling=False)
+        components.html(side1, height=SIDE_IFRAME_HEIGHT, scrolling=False)
     with cb:
-        components.html(side2, height=440, scrolling=False)
+        components.html(side2, height=SIDE_IFRAME_HEIGHT, scrolling=False)
