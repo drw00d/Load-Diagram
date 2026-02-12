@@ -16,29 +16,31 @@ COL_DESC = "Short Descrip"
 COL_ACTIVE = "Active"
 COL_UNIT_H = "Unit Height (In)"
 COL_UNIT_WT = "Unit Weight (lbs)"
-COL_EDGE = "Edge Type"            # for Machine Edge rule
+COL_EDGE = "Edge Type"  # used for Machine Edge rule
 
 COL_THICK = "Panel Thickness"
 COL_WIDTH = "Width"
 COL_LENGTH = "Length"
 
-# --- Car rules ---
+# --- Car rules / layout ---
 FLOOR_SPOTS = 15
 DOOR_START_SPOT = 6
 DOOR_END_SPOT = 9
-DOORFRAME_SPOTS_NO_MACHINE_EDGE = {6, 9}
-DOORWAY_SPOTS_ALLOW_MACHINE_EDGE = {7, 8}
+
+DOORFRAME_SPOTS_NO_MACHINE_EDGE = {6, 9}   # doorframe locations
+DOORWAY_SPOTS_ALLOW_MACHINE_EDGE = {7, 8}  # door pocket locations
 AIRBAG_ALLOWED_GAPS = [(6, 7), (7, 8), (8, 9)]
 
 
 # =============================
-# Load + Normalize Product Master
+# Data loading
 # =============================
 @st.cache_data(show_spinner=False)
 def load_product_master(path: str) -> pd.DataFrame:
     df = pd.read_excel(path, engine="openpyxl")
     df.columns = [c.strip() for c in df.columns]
 
+    # fallback column name
     global COL_DESC
     if COL_DESC not in df.columns and "Descrip" in df.columns:
         COL_DESC = "Descrip"
@@ -77,9 +79,9 @@ def lookup_product(df: pd.DataFrame, product_id: str) -> dict:
     r = row.iloc[0]
     return {
         "product_id": pid,
-        "commodity": r[COL_COMMODITY],
-        "facility_id": r[COL_FACILITY] if COL_FACILITY in df.columns else "",
-        "description": r[COL_DESC] if COL_DESC in df.columns else "",
+        "commodity": str(r[COL_COMMODITY]).strip(),
+        "facility_id": str(r[COL_FACILITY]).strip() if COL_FACILITY in df.columns else "",
+        "description": str(r[COL_DESC]).strip() if COL_DESC in df.columns else "",
         "edge_type": str(r[COL_EDGE]).strip(),
         "unit_height_in": float(r[COL_UNIT_H]),
         "unit_weight_lbs": float(r[COL_UNIT_WT]),
@@ -87,34 +89,22 @@ def lookup_product(df: pd.DataFrame, product_id: str) -> dict:
 
 
 # =============================
-# Side ownership rules
-# - Outside doorway (1–5, 10–15): stagger A/B alternating.
-# - Inside doorway (6–9): NO stagger, treat as "Neutral" and show on BOTH sides.
+# Rules helpers
 # =============================
 def is_doorway_spot(spot_num: int) -> bool:
     return DOOR_START_SPOT <= spot_num <= DOOR_END_SPOT
 
 
 def spot_side_outside_doorway(spot_num: int) -> str:
-    # simple alternating outside doorway
+    # simple alternating pattern
     return "A" if (spot_num % 2 == 1) else "B"
 
 
 def spot_belongs_to_side(spot_num: int, side: str) -> bool:
+    # doorway shows on both sides (no stagger)
     if is_doorway_spot(spot_num):
-        return True  # doorway shown on both sides
+        return True
     return spot_side_outside_doorway(spot_num) == side
-
-
-# =============================
-# Plan model: per spot store layers [{product_id, tiers}]
-# =============================
-def init_plan() -> list[list[dict]]:
-    return [[] for _ in range(FLOOR_SPOTS)]
-
-
-def spot_tiers(spot_layers: list[dict]) -> int:
-    return int(sum(int(x["tiers"]) for x in spot_layers))
 
 
 def is_machine_edge(edge_type: str) -> bool:
@@ -125,8 +115,19 @@ def is_machine_edge(edge_type: str) -> bool:
 def can_place_in_spot(product_lookup: dict, pid: str, spot_num: int) -> tuple[bool, str]:
     edge = str(product_lookup.get(pid, {}).get("edge_type", "")).strip()
     if is_machine_edge(edge) and spot_num in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
-        return False, f"Machine Edge not allowed in Spot {spot_num} (doorframe). Use Spot 7 or 8 in doorway."
+        return False, f"Machine Edge not allowed in Spot {spot_num} (doorframe). Use Spot 7 or 8 if in doorway."
     return True, ""
+
+
+# =============================
+# Plan model
+# =============================
+def init_plan() -> list[list[dict]]:
+    return [[] for _ in range(FLOOR_SPOTS)]
+
+
+def spot_tiers(spot_layers: list[dict]) -> int:
+    return int(sum(int(x["tiers"]) for x in spot_layers))
 
 
 def add_layers_to_plan(
@@ -135,13 +136,14 @@ def add_layers_to_plan(
     pid: str,
     tiers_to_add: int,
     max_tiers_per_spot: int,
-    preferred_side: str = "A",
+    preferred_side: str,
 ) -> list[str]:
     """
-    Fill tiers across spots.
-    Preference:
-      - Outside doorway: fill the preferred stagger side first (A or B), then the other.
-      - Doorway spots 6–9 are neutral; they are filled after outside doorway by default.
+    Fill tiers across spots with AAR-friendly behavior:
+      - Outside doorway: fill preferred side's stagger spots first, then the other side.
+      - Doorway (6–9): filled LAST (neutral zone).
+      - Allows mixing SKUs by tiers within a spot.
+      - Enforces Machine Edge not in 6 or 9.
     """
     remaining = int(tiers_to_add)
     msgs: list[str] = []
@@ -154,7 +156,7 @@ def add_layers_to_plan(
     outside_pref = [s for s in outside if spot_side_outside_doorway(s) == preferred_side] + \
                    [s for s in outside if spot_side_outside_doorway(s) != preferred_side]
 
-    spot_order = outside_pref + doorway  # doorway last, so it behaves like Load Xpert
+    spot_order = outside_pref + doorway
 
     for spot_num in spot_order:
         if remaining <= 0:
@@ -188,7 +190,7 @@ def add_layers_to_plan(
 
 
 # =============================
-# Rendering helpers
+# Rendering
 # =============================
 def color_for_pid(pid: str) -> str:
     palette = [
@@ -220,15 +222,18 @@ def render_top_svg(
     airbag_gap_in: float,
     airbag_gap_choice: tuple[int, int],
     unit_length_ref_in: float,
+    center_end: str,  # "None" | "Spot 1" | "Spot 15"
 ) -> str:
     """
-    Load-Xpert-like top:
-      - Outside doorway: staggered offset
-      - Doorway spots 6–9: NOT staggered (centered)
+    Top view:
+      - Outside doorway: staggered A/B offset
+      - Doorway 6–9: NOT staggered (centered)
+      - Optional: center one end unit (Spot 1 or 15) for even appearance
     """
     W, H = 1200, 280
     margin = 30
     header_h = 70
+
     x0, y0 = margin, margin + header_h
     w = W - 2 * margin
     lane_h = H - y0 - margin
@@ -238,8 +243,15 @@ def render_top_svg(
     box_h = lane_h * 0.65
     offset = lane_h * 0.12
 
+    # airbag band width (visual)
     frac = 0.0 if unit_length_ref_in <= 0 else (float(airbag_gap_in) / float(unit_length_ref_in))
     band_w = max(8.0, min(cell_w * 0.9, cell_w * frac))
+
+    center_end_spot = None
+    if center_end == "Spot 1":
+        center_end_spot = 1
+    elif center_end == "Spot 15":
+        center_end_spot = 15
 
     svg = []
     svg.append(f'<svg width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">')
@@ -265,21 +277,27 @@ def render_top_svg(
     svg.append(f'<rect x="{band_x}" y="{y0}" width="{band_w}" height="{lane_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
     svg.append(f'<text x="{band_x+4}" y="{y0+lane_h+16}" font-size="12" fill="#d00000">Airbag {airbag_gap_in:.1f}" between {airbag_gap_choice[0]}–{airbag_gap_choice[1]}</text>')
 
-    # draw spots
+    # spots
     for i in range(FLOOR_SPOTS):
         spot_num = i + 1
         layers = plan[i]
+
         x = x0 + i * cell_w + cell_w * 0.08
         bw = cell_w * 0.84
 
-        # NO stagger in doorway
+        # determine y position
         if is_doorway_spot(spot_num):
             y = lane_y_center - box_h / 2
-            side_tag = ""  # neutral
+            side_tag = ""
         else:
-            side = spot_side_outside_doorway(spot_num)
-            y = lane_y_center - (box_h / 2) - (offset if side == "A" else -offset)
-            side_tag = side
+            # optional: center one end spot to balance the stagger visually
+            if center_end_spot is not None and spot_num == center_end_spot:
+                y = lane_y_center - box_h / 2
+                side_tag = spot_side_outside_doorway(spot_num)
+            else:
+                side = spot_side_outside_doorway(spot_num)
+                y = lane_y_center - (box_h / 2) - (offset if side == "A" else -offset)
+                side_tag = side
 
         fill = "#ffffff" if not layers else color_for_pid(layers[0]["product_id"])
         svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="{fill}" opacity="0.75" stroke="#333" stroke-width="1"/>')
@@ -296,7 +314,7 @@ def render_top_svg(
             if len(layers) > 2:
                 svg.append(f'<text x="{x+6}" y="{y+44 + 2*16}" font-size="12" fill="#000">+{len(layers)-2} more</text>')
 
-        # doorframe warning box on 6 and 9
+        # doorframe warning on 6 and 9
         if spot_num in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
             svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#7a0000" stroke-width="3"/>')
             svg.append(f'<text x="{x+6}" y="{y+box_h-8}" font-size="11" fill="#7a0000">NO Machine Edge</text>')
@@ -317,19 +335,20 @@ def render_side_svg(
 ) -> str:
     """
     Side view:
-      - Outside doorway: show only that side's staggered spots
-      - Doorway (6–9): show on BOTH sides (no stagger)
+      - Outside doorway: show only that side's stagger spots
+      - Doorway 6–9: show on BOTH sides
     """
     W, H = 1200, 400
     margin = 30
     header_h = 45
+
     x0, y0 = margin, margin + header_h
     plot_w = W - 2 * margin
     plot_h = H - y0 - margin
     cell_w = plot_w / FLOOR_SPOTS
     base_y = y0 + plot_h
 
-    # max stack height
+    # determine max height
     max_stack_in = 0.0
     for spot_num in range(1, FLOOR_SPOTS + 1):
         layers = plan[spot_num - 1]
@@ -363,6 +382,7 @@ def render_side_svg(
         spot_num = i + 1
         x = x0 + i * cell_w + 2
         w = cell_w - 4
+
         svg.append(f'<text x="{x+2}" y="{base_y+14}" font-size="11" fill="#333">{spot_num}</text>')
 
         if not spot_belongs_to_side(spot_num, side_filter):
@@ -392,9 +412,13 @@ def render_side_svg(
 
 
 # =============================
-# App UI
+# App
 # =============================
-pm = load_product_master(MASTER_PATH)
+try:
+    pm = load_product_master(MASTER_PATH)
+except Exception as e:
+    st.error(f"Could not load Product Master: {e}")
+    st.stop()
 
 if "plan" not in st.session_state:
     st.session_state.plan = init_plan()
@@ -406,6 +430,9 @@ if "selected_facility" not in st.session_state:
 with st.sidebar:
     st.header("Settings")
     car_id = st.text_input("Car ID", value="TBOX632012")
+
+    st.divider()
+    st.header("Stacking")
     max_tiers = st.slider("Max tiers per spot", 1, 8, 4)
     car_inside_height_in = st.number_input("Inside height ref (in)", min_value=60.0, value=110.0, step=1.0)
 
@@ -419,10 +446,14 @@ with st.sidebar:
     st.divider()
     st.header("Placement")
     preferred_side = st.selectbox("Fill preference outside doorway", ["A", "B"], index=0)
-    mirror_side_b = st.checkbox("Mirror Side B tier order (optional)", value=False)
+
+    st.divider()
+    st.header("Diagram look")
+    center_end = st.selectbox("Center one end unit (Top view)", ["None", "Spot 1", "Spot 15"], index=2)
 
     st.divider()
     view_mode = st.radio("View", ["Top + Both Sides", "Top only", "Sides only"], index=0)
+    mirror_side_b = st.checkbox("Mirror Side B tier order (optional)", value=False)
 
 st.success(f"Product Master loaded: {len(pm):,} rows")
 
@@ -453,7 +484,7 @@ pm_cf = pm_c.copy()
 if facility_selected != "(All facilities)" and COL_FACILITY in pm_cf.columns:
     pm_cf = pm_cf[pm_cf[COL_FACILITY].astype(str) == str(facility_selected)].copy()
 
-# Picker
+# Picker search
 search = st.text_input("Search (by Product Id or Description)", value="")
 if search.strip():
     s = search.strip().lower()
@@ -462,11 +493,14 @@ if search.strip():
         | (pm_cf[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_cf.columns else False)
     ].copy()
 
+# Sort + dedupe
 sort_cols, ascending = [], []
 for c in [COL_THICK, COL_WIDTH, COL_LENGTH]:
     if c in pm_cf.columns:
-        sort_cols.append(c); ascending.append(False)
-sort_cols.append(COL_PRODUCT_ID); ascending.append(True)
+        sort_cols.append(c)
+        ascending.append(False)
+sort_cols.append(COL_PRODUCT_ID)
+ascending.append(True)
 
 pm_cf = pm_cf.sort_values(by=sort_cols, ascending=ascending, na_position="last")
 pm_cf = pm_cf.drop_duplicates(subset=[COL_PRODUCT_ID], keep="first").head(5000)
@@ -497,12 +531,19 @@ if add_btn and selected_label:
     idx = labels.index(selected_label)
     pid = str(options[idx][COL_PRODUCT_ID])
     prod = lookup_product(pm, pid)
-    messages = add_layers_to_plan(st.session_state.plan, {pid: prod}, pid, int(tiers_to_add), int(max_tiers), preferred_side)
+    messages = add_layers_to_plan(
+        st.session_state.plan,
+        {pid: prod},
+        pid,
+        int(tiers_to_add),
+        int(max_tiers),
+        str(preferred_side),
+    )
 
 for m in messages:
     st.warning(m)
 
-# Build lookup for all in plan
+# Build lookup for anything in plan
 product_ids_in_plan = sorted({ly["product_id"] for spot in st.session_state.plan for ly in spot})
 product_lookup = {pid: lookup_product(pm, pid) for pid in product_ids_in_plan} if product_ids_in_plan else {}
 
@@ -518,17 +559,21 @@ for spot_num in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
 for v in violations:
     st.error(v)
 
-# Airbag gap choice tuple
+# airbag gap tuple
 airbag_gap_choice = AIRBAG_ALLOWED_GAPS[[f"{a}–{b}" for a, b in AIRBAG_ALLOWED_GAPS].index(gap_choice_label)]
 
 # Summary
-payload = sum(int(ly["tiers"]) * float(product_lookup.get(ly["product_id"], {}).get("unit_weight_lbs", 0.0))
-              for spot in st.session_state.plan for ly in spot)
+payload = sum(
+    int(ly["tiers"]) * float(product_lookup.get(ly["product_id"], {}).get("unit_weight_lbs", 0.0))
+    for spot in st.session_state.plan
+    for ly in spot
+)
+
 st.subheader("Summary")
 st.metric("Payload (lbs)", f"{payload:,.0f}")
 st.caption("Outside doorway (1–5, 10–15) staggered. Doorway (6–9) NOT staggered and shown on both sides.")
 
-# Table
+# Plan table
 rows = []
 for i, spot in enumerate(st.session_state.plan):
     spot_num = i + 1
@@ -537,7 +582,7 @@ for i, spot in enumerate(st.session_state.plan):
     rows.append({"Spot": spot_num, "Side": side, "Tiers": spot_tiers(spot), "Composition": comp})
 st.dataframe(pd.DataFrame(rows), use_container_width=True, height=260)
 
-# Render
+# Diagrams
 note = (
     f"Commodity: {commodity_selected} | Facility: {facility_selected} | "
     f"Doorway: {DOOR_START_SPOT}–{DOOR_END_SPOT} (no stagger) | Airbag: {gap_choice_label} @ {airbag_gap_in:.1f}\""
@@ -550,6 +595,7 @@ top_svg = render_top_svg(
     airbag_gap_in=float(airbag_gap_in),
     airbag_gap_choice=airbag_gap_choice,
     unit_length_ref_in=float(unit_length_ref_in),
+    center_end=str(center_end),
 )
 
 side_a = render_side_svg(
