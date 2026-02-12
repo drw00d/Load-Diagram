@@ -28,6 +28,9 @@ COL_UNIT_H = "Unit Height (In)"
 COL_UNIT_WT = "Unit Weight (lbs)"
 COL_EDGE = "Edge Type"
 
+# Optional/if present
+COL_HALF_PACK = "Half Pack"
+
 COL_THICK = "Panel Thickness"
 COL_WIDTH = "Width"
 COL_LENGTH = "Length"
@@ -37,8 +40,8 @@ FLOOR_SPOTS = 15
 DOOR_START_SPOT = 6
 DOOR_END_SPOT = 9
 
-DOORFRAME_SPOTS_NO_MACHINE_EDGE = {6, 9}   # doorframe
-DOORPOCKET_SPOTS = {7, 8}                  # doorway pocket
+DOORFRAME_SPOTS_NO_MACHINE_EDGE = {6, 9}  # doorframe
+DOORPOCKET_SPOTS = {7, 8}                 # door pocket
 AIRBAG_ALLOWED_GAPS = [(6, 7), (7, 8), (8, 9)]
 
 
@@ -54,6 +57,7 @@ class Product:
     edge_type: str
     unit_height_in: float
     unit_weight_lbs: float
+    is_half_pack: bool
 
     @property
     def is_machine_edge(self) -> bool:
@@ -104,20 +108,35 @@ def load_product_master(path: str) -> pd.DataFrame:
     return df
 
 
+def _truthy(v) -> bool:
+    s = str(v).strip().upper()
+    return s in ("Y", "YES", "TRUE", "1", "T")
+
+
 def lookup_product(df: pd.DataFrame, pid: str) -> Product:
     pid = str(pid).strip()
     row = df.loc[df[COL_PRODUCT_ID] == pid]
     if row.empty:
         raise KeyError(f"Sales Product Id not found: {pid}")
     r = row.iloc[0]
+
+    desc = str(r[COL_DESC]).strip() if COL_DESC in df.columns else ""
+    is_hp = False
+    if COL_HALF_PACK in df.columns:
+        is_hp = _truthy(r.get(COL_HALF_PACK, ""))
+    else:
+        # fallback heuristic: description ends with HP
+        is_hp = desc.upper().rstrip().endswith("HP")
+
     return Product(
         product_id=pid,
         commodity=str(r[COL_COMMODITY]).strip(),
         facility_id=str(r[COL_FACILITY]).strip() if COL_FACILITY in df.columns else "",
-        description=str(r[COL_DESC]).strip() if COL_DESC in df.columns else "",
+        description=desc,
         edge_type=str(r[COL_EDGE]).strip(),
         unit_height_in=float(r[COL_UNIT_H]),
         unit_weight_lbs=float(r[COL_UNIT_WT]),
+        is_half_pack=bool(is_hp),
     )
 
 
@@ -134,7 +153,7 @@ def spot_side_outside_doorway(spot: int) -> str:
 
 
 def spot_belongs_to_side(spot: int, side: str) -> bool:
-    # Doorway shows on both sides
+    # Doorway shows on BOTH sides
     if is_doorway_spot(spot):
         return True
     return spot_side_outside_doorway(spot) == side
@@ -142,10 +161,6 @@ def spot_belongs_to_side(spot: int, side: str) -> bool:
 
 def outside_doorway_spots() -> List[int]:
     return [s for s in range(1, FLOOR_SPOTS + 1) if not is_doorway_spot(s)]
-
-
-def doorway_spots() -> List[int]:
-    return [s for s in range(1, FLOOR_SPOTS + 1) if is_doorway_spot(s)]
 
 
 def center_out_order_outside() -> List[int]:
@@ -161,29 +176,47 @@ def center_out_order_outside() -> List[int]:
             order.append(left[i])
         if i < len(right):
             order.append(right[i])
-    # Ensure only non-doorway
     return [s for s in order if s in outside_doorway_spots()]
 
 
 def doorway_fill_order() -> List[int]:
-    """
-    Prefer door pocket spots 7/8 first (good for airbag/door),
-    then 6/9 last (doorframe restrictions).
-    """
+    # Fill door pocket first, then doorframe
     return [7, 8, 6, 9]
 
 
 # =============================
-# Optimizer: tier-slot placement (Load-Xpert-ish)
+# Optimizer: tier-slot placement
 # =============================
+def make_empty_matrix(max_tiers: int) -> List[List[Optional[str]]]:
+    # matrix[spot_index][tier_index], tier_index 0 is bottom
+    return [[None for _ in range(max_tiers)] for _ in range(FLOOR_SPOTS)]
+
+
+def spot_has_capacity(matrix: List[List[Optional[str]]], spot: int) -> bool:
+    col = matrix[spot - 1]
+    return any(v is None for v in col)
+
+
+def next_empty_tier_index(matrix: List[List[Optional[str]]], spot: int) -> Optional[int]:
+    col = matrix[spot - 1]
+    for t in range(len(col)):  # bottom -> top
+        if col[t] is None:
+            return t
+    return None
+
+
+def can_place_pid(products: Dict[str, Product], pid: str, spot: int, tier_idx: int, max_tiers: int) -> Tuple[bool, str]:
+    p = products[pid]
+    # Machine edge rule
+    if p.is_machine_edge and spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
+        return False, f"Machine Edge not allowed in Spot {spot} (doorframe)."
+    # Half pack rule: never top tier
+    if p.is_half_pack and tier_idx == (max_tiers - 1):
+        return False, f"Half Pack not allowed on top tier (Spot {spot}, Tier {tier_idx+1})."
+    return True, ""
+
+
 def build_token_lists(products: Dict[str, Product], requests: List[RequestLine]) -> Tuple[List[str], List[str]]:
-    """
-    Split requested tiers into two token lists:
-      - heavy-ish group
-      - light-ish group
-    We alternate these groups vertically inside each spot.
-    """
-    # Expand counts
     expanded: List[Tuple[str, float]] = []
     for r in requests:
         if r.tiers <= 0:
@@ -194,60 +227,29 @@ def build_token_lists(products: Dict[str, Product], requests: List[RequestLine])
     if not expanded:
         return [], []
 
-    # Sort by weight
     expanded.sort(key=lambda x: x[1], reverse=True)
-
-    # Split into heavy / light halves
     mid = math.ceil(len(expanded) / 2)
     heavy = [pid for pid, _ in expanded[:mid]]
     light = [pid for pid, _ in expanded[mid:]]
-
     return heavy, light
 
 
-def make_empty_matrix(max_tiers: int) -> List[List[Optional[str]]]:
-    """
-    matrix[spot_index][tier_index] where tier_index 0 is bottom tier.
-    """
-    return [[None for _ in range(max_tiers)] for _ in range(FLOOR_SPOTS)]
-
-
-def spot_has_capacity(matrix: List[List[Optional[str]]], spot: int) -> bool:
-    idx = spot - 1
-    return any(v is None for v in matrix[idx])
-
-
-def next_empty_tier_index(matrix: List[List[Optional[str]]], spot: int) -> Optional[int]:
-    idx = spot - 1
-    for t in range(len(matrix[idx])):  # bottom -> top
-        if matrix[idx][t] is None:
-            return t
-    return None
-
-
-def can_place_pid_in_spot(products: Dict[str, Product], pid: str, spot: int) -> bool:
-    p = products[pid]
-    if p.is_machine_edge and spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
-        return False
-    return True
-
-
-def choose_spot_for_pid(
-    matrix: List[List[Optional[str]]],
+def pop_first_placeable(
+    tokens: List[str],
     products: Dict[str, Product],
-    pid: str,
-    desired_spot_order: List[int],
-) -> Optional[int]:
+    spot: int,
+    tier_idx: int,
+    max_tiers: int,
+) -> Optional[str]:
     """
-    Pick the first spot in order that has capacity and passes rules.
-    Special-case: if pid is machine edge, skip doorframe 6/9.
+    Take the first token in this list that can be placed in (spot,tier).
+    Remove it from the list and return it. If none work, return None.
     """
-    for s in desired_spot_order:
-        if not spot_has_capacity(matrix, s):
-            continue
-        if not can_place_pid_in_spot(products, pid, s):
-            continue
-        return s
+    for i, pid in enumerate(tokens):
+        ok, _ = can_place_pid(products, pid, spot, tier_idx, max_tiers)
+        if ok:
+            tokens.pop(i)
+            return pid
     return None
 
 
@@ -258,69 +260,38 @@ def optimize_layout(
     preferred_side_outside: str,
 ) -> Tuple[List[List[Optional[str]]], List[str]]:
     """
-    Produces a 15 x max_tiers matrix of SKUs, mixing SKUs:
-      - Vertically: alternate heavy-ish and light-ish tokens in each spot
-      - Lengthwise: center-out placement outside doorway, then doorway pocket (7/8), then 6/9
-      - Outside doorway: bias spot order by preferred side first (A or B), but still center-out
+    Places tier-by-tier with vertical heavy/light alternation:
+      - tier 1 prefers heavy, tier 2 prefers light, etc.
+      - spot selection: even fill across spots using center-out order
+      - doorway: 6–9 placed after outside, with 7/8 before 6/9
+      - constraints enforced per (spot,tier) including HalfPack-top prohibition
     """
     msgs: List[str] = []
 
     heavy, light = build_token_lists(products, requests)
-    total_tokens = len(heavy) + len(light)
-    if total_tokens == 0:
+    if not heavy and not light:
         return make_empty_matrix(max_tiers_per_spot), ["No requested tiers to place."]
 
-    # Spot orders
     outside_order = center_out_order_outside()
-    # Bias by preferred side while keeping center-out character
     if preferred_side_outside in ("A", "B"):
         pref = [s for s in outside_order if spot_side_outside_doorway(s) == preferred_side_outside]
         other = [s for s in outside_order if spot_side_outside_doorway(s) != preferred_side_outside]
         outside_order = pref + other
 
-    door_order = doorway_fill_order()
-
-    # Combined "try" order per placement:
-    # - primarily outside doorway
-    # - then doorway pocket / doorway
-    base_order = outside_order + door_order
-
+    base_order = outside_order + doorway_fill_order()
     matrix = make_empty_matrix(max_tiers_per_spot)
 
-    # We place token-by-token into the matrix. To enforce vertical alternation,
-    # we alternate heavy/light *per spot tier level*:
-    # bottom tier prefers heavy, next prefers light, etc.
-    # Implementation: whenever we place into a spot's tier t, prefer:
-    #   heavy if t is even, light if t is odd.
-    # If that group is empty, fall back to the other.
-    def pop_from(group: str) -> Optional[str]:
-        nonlocal heavy, light
-        if group == "heavy":
-            return heavy.pop(0) if heavy else None
-        return light.pop(0) if light else None
+    def tier_pref_group(tier_idx: int) -> str:
+        return "heavy" if (tier_idx % 2 == 0) else "light"
 
-    def pop_best_for_tier(tier_index: int) -> Optional[str]:
-        prefer = "heavy" if (tier_index % 2 == 0) else "light"
-        pid = pop_from(prefer)
-        if pid is not None:
-            return pid
-        # fallback
-        return pop_from("light" if prefer == "heavy" else "heavy")
-
-    # Main fill loop: attempt to place until tokens exhausted or matrix full
-    placed = 0
-    # Continue while there is any capacity anywhere
     while (heavy or light) and any(spot_has_capacity(matrix, s) for s in range(1, FLOOR_SPOTS + 1)):
-        # Choose next spot to fill: pick the spot with least filled tiers first (promotes evenness)
-        # but follow base_order for stability.
+        # pick the least-filled spot among base_order
         best_spot = None
         best_fill = None
         for s in base_order:
             if not spot_has_capacity(matrix, s):
                 continue
-            # fill count
-            idx = s - 1
-            filled = sum(v is not None for v in matrix[idx])
+            filled = sum(v is not None for v in matrix[s - 1])
             if best_fill is None or filled < best_fill:
                 best_fill = filled
                 best_spot = s
@@ -331,59 +302,55 @@ def optimize_layout(
         if tier_idx is None:
             continue
 
-        pid = pop_best_for_tier(tier_idx)
-        if pid is None:
-            break
+        pref = tier_pref_group(tier_idx)
 
-        # Enforce machine edge rule; if illegal for this spot, try alternate spots
-        if not can_place_pid_in_spot(products, pid, best_spot):
-            # Try to find another spot at same tier index that is legal
-            # Prefer door pocket if we're in doorway spots, otherwise search base order
-            alt_spot = None
+        # Choose a pid that can actually be placed at (best_spot,tier_idx)
+        pid = None
+        if pref == "heavy":
+            pid = pop_first_placeable(heavy, products, best_spot, tier_idx, max_tiers_per_spot)
+            if pid is None:
+                pid = pop_first_placeable(light, products, best_spot, tier_idx, max_tiers_per_spot)
+        else:
+            pid = pop_first_placeable(light, products, best_spot, tier_idx, max_tiers_per_spot)
+            if pid is None:
+                pid = pop_first_placeable(heavy, products, best_spot, tier_idx, max_tiers_per_spot)
+
+        # If nothing placeable in this spot/tier, try another spot with same tier_idx
+        if pid is None:
+            found = False
             for s in base_order:
                 if not spot_has_capacity(matrix, s):
                     continue
                 ti = next_empty_tier_index(matrix, s)
                 if ti != tier_idx:
-                    continue  # keep vertical alternation consistent
-                if can_place_pid_in_spot(products, pid, s):
-                    alt_spot = s
+                    continue
+                pref = tier_pref_group(ti)
+                if pref == "heavy":
+                    pid = pop_first_placeable(heavy, products, s, ti, max_tiers_per_spot) or \
+                          pop_first_placeable(light, products, s, ti, max_tiers_per_spot)
+                else:
+                    pid = pop_first_placeable(light, products, s, ti, max_tiers_per_spot) or \
+                          pop_first_placeable(heavy, products, s, ti, max_tiers_per_spot)
+                if pid is not None:
+                    best_spot = s
+                    tier_idx = ti
+                    found = True
                     break
-
-            if alt_spot is None:
-                # Can't place this pid at this tier level anywhere; put it back and stop
-                msgs.append(f"Could not place SKU {pid} at tier level {tier_idx+1} due to rules/capacity.")
-                # push back to front of its group roughly
-                # (safe fallback; not perfect but keeps it from disappearing)
-                if products[pid].unit_weight_lbs >= 0:
-                    heavy.insert(0, pid)
+            if not found:
+                msgs.append(f"Could not place any remaining tiers at Tier {tier_idx+1} due to constraints/capacity.")
                 break
 
-            best_spot = alt_spot
-            tier_idx = next_empty_tier_index(matrix, best_spot)
-            if tier_idx is None:
-                continue
-
         matrix[best_spot - 1][tier_idx] = pid
-        placed += 1
 
-    # If unplaced remain, warn
     remaining = len(heavy) + len(light)
     if remaining > 0:
         msgs.append(f"{remaining} tiers could not be placed (capacity/rules).")
-
-    # Quick doorway validation for machine edge
-    for s in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
-        idx = s - 1
-        for pid in matrix[idx]:
-            if pid and products[pid].is_machine_edge:
-                msgs.append(f"Rule violation: Machine Edge SKU {pid} placed in Spot {s}. (Should not happen)")
 
     return matrix, msgs
 
 
 # =============================
-# Rendering (Top + Sides) - tier-accurate
+# Rendering
 # =============================
 def color_for_pid(pid: str) -> str:
     palette = [
@@ -417,13 +384,6 @@ def render_top_svg(
     unit_length_ref_in: float,
     center_end: str,
 ) -> str:
-    """
-    Top view: show footprint boxes (1-wide).
-    - Outside doorway: staggered A/B
-    - Doorway 6-9: not staggered (centered)
-    - Optional: center end (Spot 1 or Spot 15) for symmetry
-    - Label shows a compact mix summary (top 2 + "+n")
-    """
     W, H = 1200, 280
     margin = 30
     header_h = 70
@@ -459,18 +419,15 @@ def render_top_svg(
     svg.append(f'<text x="{margin+8}" y="{margin+26}" font-size="18" font-weight="600">Car: {car_id} — Top View</text>')
     svg.append(f'<text x="{margin+8}" y="{margin+50}" font-size="13">{note}</text>')
 
-    # doorway overlay
     door_left, door_right = doorway_bounds_px(x0, cell_w)
     svg.append(f'<rect x="{door_left}" y="{y0}" width="{door_right-door_left}" height="{lane_h}" fill="url(#doorHatch)" stroke="#c00000" stroke-width="3" opacity="0.9"/>')
     svg.append(f'<text x="{door_left+6}" y="{y0-10}" font-size="12" fill="#c00000">Doorway (Spots {DOOR_START_SPOT}–{DOOR_END_SPOT})</text>')
 
-    # airbag band
     center_x = airbag_center_px(x0, cell_w, airbag_gap_choice)
     band_x = center_x - band_w / 2
     svg.append(f'<rect x="{band_x}" y="{y0}" width="{band_w}" height="{lane_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
     svg.append(f'<text x="{band_x+4}" y="{y0+lane_h+16}" font-size="12" fill="#d00000">Airbag {airbag_gap_in:.1f}" between {airbag_gap_choice[0]}–{airbag_gap_choice[1]}</text>')
 
-    # draw spots
     for i in range(FLOOR_SPOTS):
         spot = i + 1
         col = matrix[i]
@@ -478,7 +435,6 @@ def render_top_svg(
         x = x0 + i * cell_w + cell_w * 0.08
         bw = cell_w * 0.84
 
-        # y positioning
         if is_doorway_spot(spot):
             y = lane_y_center - box_h / 2
             side_tag = ""
@@ -491,7 +447,6 @@ def render_top_svg(
                 y = lane_y_center - (box_h / 2) - (offset if side == "A" else -offset)
                 side_tag = side
 
-        # pick a representative color: bottom-most non-null
         rep = next((pid for pid in col if pid is not None), None)
         fill = "#ffffff" if rep is None else color_for_pid(rep)
 
@@ -499,7 +454,6 @@ def render_top_svg(
         label = f"{spot}{side_tag}" if side_tag else f"{spot}"
         svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{label}</text>')
 
-        # compact mix summary (counts in this spot)
         counts: Dict[str, int] = {}
         for pid in col:
             if pid is None:
@@ -510,13 +464,11 @@ def render_top_svg(
             tooltip = " | ".join([f"{pid} x{cnt}" for pid, cnt in items])
             svg.append(f"<title>Spot {spot}: {tooltip}</title>")
 
-            # show top 2 lines
             for li, (pid, cnt) in enumerate(items[:2]):
                 svg.append(f'<text x="{x+6}" y="{y+44 + li*16}" font-size="12" fill="#000">{pid} x{cnt}</text>')
             if len(items) > 2:
                 svg.append(f'<text x="{x+6}" y="{y+44 + 2*16}" font-size="12" fill="#000">+{len(items)-2} more</text>')
 
-        # doorframe warning
         if spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
             svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#7a0000" stroke-width="3"/>')
             svg.append(f'<text x="{x+6}" y="{y+box_h-8}" font-size="11" fill="#7a0000">NO Machine Edge</text>')
@@ -525,88 +477,81 @@ def render_top_svg(
     return "\n".join(svg)
 
 
-def render_side_svg(
+def render_side_grid_svg(
     *,
     car_id: str,
     matrix: List[List[Optional[str]]],
     products: Dict[str, Product],
     side_name: str,
-    side_filter: str,     # "A" or "B"
-    inside_height_ref_in: float,
+    side_filter: str,  # "A" or "B"
 ) -> str:
     """
-    Side view: true tier-by-tier rectangles for each spot on that side.
-    Doorway spots appear on BOTH sides.
+    Load-Xpert style side diagram:
+      - Columns = spots 1..15
+      - Rows = tiers (top row is top tier)
+      - Doorway 6..9 highlighted
+      - Show doorway on BOTH sides
+      - For non-doorway, show only that side's spots (others blank)
     """
-    W, H = 1200, 430
-    margin = 30
-    header_h = 45
+    tiers = len(matrix[0]) if matrix else 0
+    W = 1200
+    H = 120 + tiers * 70
+    margin = 25
 
-    x0, y0 = margin, margin + header_h
-    plot_w = W - 2 * margin
-    plot_h = H - y0 - margin
-    cell_w = plot_w / FLOOR_SPOTS
-    base_y = y0 + plot_h
-
-    max_tiers = len(matrix[0]) if matrix else 0
-    # Determine max stack height (inches) for scale
-    max_stack_in = 1.0
-    for spot in range(1, FLOOR_SPOTS + 1):
-        if not spot_belongs_to_side(spot, side_filter):
-            continue
-        col = matrix[spot - 1]
-        stack_in = 0.0
-        for pid in col:
-            if pid is None:
-                continue
-            stack_in += float(products[pid].unit_height_in)
-        max_stack_in = max(max_stack_in, stack_in)
-
-    ref_h = max(float(inside_height_ref_in), max_stack_in, 1.0)
-    scale = plot_h / ref_h
+    grid_x = margin
+    grid_y = margin + 55
+    grid_w = W - 2 * margin
+    cell_w = grid_w / FLOOR_SPOTS
+    cell_h = 60
 
     svg = []
     svg.append(f'<svg width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">')
     svg.append(f'<rect x="{margin}" y="{margin}" width="{W-2*margin}" height="{H-2*margin}" fill="white" stroke="black" stroke-width="2"/>')
-    svg.append(f'<text x="{margin+8}" y="{margin+26}" font-size="16" font-weight="600">Car: {car_id} — {side_name}</text>')
+    svg.append(f'<text x="{margin+8}" y="{margin+28}" font-size="16" font-weight="600">Car: {car_id} — {side_name}</text>')
+    svg.append(f'<text x="{margin+8}" y="{margin+48}" font-size="12" fill="#444">Grid view: spots (1–15) × tiers (bottom→top). Doorway 6–9 shown on both sides.</text>')
 
-    # base and ref
-    svg.append(f'<line x1="{x0}" y1="{base_y}" x2="{x0+plot_w}" y2="{base_y}" stroke="#000" stroke-width="1"/>')
-    top_ref_y = base_y - float(inside_height_ref_in) * scale
-    svg.append(f'<line x1="{x0}" y1="{top_ref_y}" x2="{x0+plot_w}" y2="{top_ref_y}" stroke="#999" stroke-width="1" />')
-    svg.append(f'<text x="{x0+4}" y="{top_ref_y-6}" font-size="12" fill="#666">Inside height ref</text>')
+    # doorway outline
+    door_left = grid_x + (DOOR_START_SPOT - 1) * cell_w
+    door_right = grid_x + DOOR_END_SPOT * cell_w
+    svg.append(f'<rect x="{door_left}" y="{grid_y}" width="{door_right-door_left}" height="{tiers*cell_h}" fill="none" stroke="#c00000" stroke-width="3" opacity="0.8"/>')
 
-    # doorway bracket
-    door_left = x0 + (DOOR_START_SPOT - 1) * cell_w
-    door_right = x0 + DOOR_END_SPOT * cell_w
-    svg.append(f'<rect x="{door_left}" y="{y0}" width="{door_right-door_left}" height="{plot_h}" fill="none" stroke="#c00000" stroke-width="2" opacity="0.5"/>')
+    # tier labels (left)
+    for t in range(tiers):
+        # t=0 bottom, display row from top
+        display_row = tiers - 1 - t
+        y = grid_y + display_row * cell_h
+        svg.append(f'<text x="{grid_x-12}" y="{y+38}" font-size="12" fill="#333" text-anchor="end">Tier {t+1}</text>')
 
-    # Draw columns
-    for i in range(FLOOR_SPOTS):
-        spot = i + 1
-        x = x0 + i * cell_w + 2
-        w = cell_w - 4
+    # cells
+    for spot in range(1, FLOOR_SPOTS + 1):
+        show_col = spot_belongs_to_side(spot, side_filter)
+        x = grid_x + (spot - 1) * cell_w
 
-        # spot labels
-        svg.append(f'<text x="{x+2}" y="{base_y+16}" font-size="11" fill="#333">{spot}</text>')
+        # spot number along bottom
+        svg.append(f'<text x="{x + cell_w/2}" y="{grid_y + tiers*cell_h + 18}" font-size="12" fill="#333" text-anchor="middle">{spot}</text>')
 
-        if not spot_belongs_to_side(spot, side_filter):
-            continue
+        for t in range(tiers):
+            pid = matrix[spot - 1][t]
+            display_row = tiers - 1 - t
+            y = grid_y + display_row * cell_h
 
-        col = matrix[i]
-        if not any(pid is not None for pid in col):
-            continue
+            # default cell
+            fill = "#ffffff"
+            stroke = "#999"
+            opacity = 1.0 if show_col else 0.15
 
-        # Draw each tier block bottom->top as its own rectangle
-        y_cursor = base_y
-        for t, pid in enumerate(col):  # tier 0 bottom
-            if pid is None:
-                continue
-            ph = float(products[pid].unit_height_in) * scale
-            y_cursor -= ph
-            svg.append(f'<rect x="{x}" y="{y_cursor}" width="{w}" height="{ph}" fill="{color_for_pid(pid)}" stroke="#333" stroke-width="1"/>')
-            # Label smaller for readability
-            svg.append(f'<text x="{x+3}" y="{y_cursor+13}" font-size="10" fill="#000">{pid}</text>')
+            if pid and show_col:
+                fill = color_for_pid(pid)
+                stroke = "#333"
+                opacity = 0.95
+
+            svg.append(f'<rect x="{x}" y="{y}" width="{cell_w}" height="{cell_h}" fill="{fill}" stroke="{stroke}" stroke-width="1" opacity="{opacity}"/>')
+
+            if pid and show_col:
+                hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
+                # compact label
+                label = f"{pid}{hp}"
+                svg.append(f'<text x="{x+4}" y="{y+18}" font-size="11" fill="#000">{label}</text>')
 
     svg.append("</svg>")
     return "\n".join(svg)
@@ -624,7 +569,7 @@ except Exception as e:
 if "requests" not in st.session_state:
     st.session_state.requests: List[RequestLine] = []
 if "matrix" not in st.session_state:
-    st.session_state.matrix = make_empty_matrix(4)  # default
+    st.session_state.matrix = make_empty_matrix(4)
 if "selected_commodity" not in st.session_state:
     st.session_state.selected_commodity = "(Select)"
 if "selected_facility" not in st.session_state:
@@ -632,16 +577,15 @@ if "selected_facility" not in st.session_state:
 
 
 # =============================
-# Sidebar controls
+# Sidebar
 # =============================
 with st.sidebar:
     st.header("Settings")
     car_id = st.text_input("Car ID", value="TBOX632012")
 
     st.divider()
-    st.header("Tiers / Height")
+    st.header("Tiers")
     max_tiers = st.slider("Max tiers per spot", 1, 8, 4)
-    inside_height_ref_in = st.number_input("Inside height ref (in)", min_value=60.0, value=110.0, step=1.0)
 
     st.divider()
     st.header("Doorway / Airbag")
@@ -662,19 +606,18 @@ airbag_gap_choice = AIRBAG_ALLOWED_GAPS[gap_labels.index(gap_choice_label)]
 
 
 # =============================
-# Filters: Commodity -> Facility -> Products
+# Filters
 # =============================
 st.success(f"Product Master loaded: {len(pm):,} rows")
 
 commodities = sorted(pm[COL_COMMODITY].dropna().astype(str).unique().tolist())
 commodity_selected = st.selectbox("Commodity / Product Type (required)", ["(Select)"] + commodities)
 
-# Reset on commodity change
 if commodity_selected != st.session_state.selected_commodity:
     st.session_state.selected_commodity = commodity_selected
     st.session_state.selected_facility = "(All facilities)"
     st.session_state.requests = []
-    st.session_state.matrix = make_empty_matrix(max_tiers)
+    st.session_state.matrix = make_empty_matrix(int(max_tiers))
 
 if commodity_selected == "(Select)":
     st.info("Select a Commodity/Product Type to proceed.")
@@ -685,19 +628,16 @@ pm_c = pm[pm[COL_COMMODITY].astype(str) == str(commodity_selected)].copy()
 facilities = sorted(pm_c[COL_FACILITY].dropna().astype(str).unique().tolist()) if COL_FACILITY in pm_c.columns else []
 facility_selected = st.selectbox("Facility Id (filtered by commodity)", ["(All facilities)"] + facilities)
 
-# Reset on facility change
 if facility_selected != st.session_state.selected_facility:
     st.session_state.selected_facility = facility_selected
     st.session_state.requests = []
-    st.session_state.matrix = make_empty_matrix(max_tiers)
+    st.session_state.matrix = make_empty_matrix(int(max_tiers))
 
 pm_cf = pm_c.copy()
 if facility_selected != "(All facilities)" and COL_FACILITY in pm_cf.columns:
     pm_cf = pm_cf[pm_cf[COL_FACILITY].astype(str) == str(facility_selected)].copy()
 
-# Search + sort + dedupe for picker
 search = st.text_input("Search (Product Id or Description)", value="")
-
 if search.strip():
     s = search.strip().lower()
     pm_cf = pm_cf[
@@ -705,6 +645,7 @@ if search.strip():
         | (pm_cf[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_cf.columns else False)
     ].copy()
 
+# Sort + dedupe
 sort_cols, ascending = [], []
 if COL_THICK in pm_cf.columns:
     sort_cols.append(COL_THICK); ascending.append(False)
@@ -723,7 +664,13 @@ def format_option(r: dict) -> str:
     edge = str(r.get(COL_EDGE, "")).strip()
     desc = str(r.get(COL_DESC, "")).strip()
     thick = r.get(COL_THICK, None)
-    parts = [pid]
+    hp = ""
+    if COL_HALF_PACK in pm_cf.columns:
+        hp = " HP" if _truthy(r.get(COL_HALF_PACK, "")) else ""
+    else:
+        hp = " HP" if desc.upper().rstrip().endswith("HP") else ""
+
+    parts = [pid + hp]
     if pd.notna(thick):
         parts.append(f'{float(thick):g}"')
     if edge:
@@ -737,7 +684,6 @@ options = pm_cf.to_dict("records")
 labels = [format_option(r) for r in options]
 selected_label = st.selectbox("Pick a Product", labels) if labels else None
 
-# Add request lines (tiers)
 c1, c2, c3, c4 = st.columns([2, 1, 1, 1], vertical_alignment="bottom")
 with c1:
     tiers_to_add = st.number_input("Tiers to add (packs)", min_value=1, value=4, step=1)
@@ -750,14 +696,13 @@ with c4:
 
 if clear_btn:
     st.session_state.requests = []
-    st.session_state.matrix = make_empty_matrix(max_tiers)
+    st.session_state.matrix = make_empty_matrix(int(max_tiers))
 
 if add_line and selected_label:
     idx = labels.index(selected_label)
     pid = str(options[idx][COL_PRODUCT_ID]).strip()
     st.session_state.requests.append(RequestLine(product_id=pid, tiers=int(tiers_to_add)))
 
-# Show requests table
 st.subheader("Requested SKUs (tiers)")
 if st.session_state.requests:
     req_df = pd.DataFrame([{"Sales Product Id": r.product_id, "Tiers": r.tiers} for r in st.session_state.requests])
@@ -765,8 +710,7 @@ if st.session_state.requests:
 else:
     st.info("Add one or more SKU lines, then click **Optimize Layout**.")
 
-# Build products dict needed by optimizer
-# (use full PM lookup so weights/heights are consistent)
+# Build products dict
 products: Dict[str, Product] = {}
 for r in st.session_state.requests:
     try:
@@ -774,12 +718,9 @@ for r in st.session_state.requests:
     except Exception as e:
         st.error(f"Could not lookup SKU {r.product_id}: {e}")
 
-# Optimize
 messages: List[str] = []
 if optimize_btn:
-    # Ensure matrix tier depth matches slider
-    st.session_state.matrix = make_empty_matrix(max_tiers)
-
+    st.session_state.matrix = make_empty_matrix(int(max_tiers))
     if not st.session_state.requests:
         st.warning("No request lines to optimize.")
     else:
@@ -795,43 +736,40 @@ if optimize_btn:
 for m in messages:
     st.warning(m)
 
-# Compute payload (from optimized matrix)
 matrix = st.session_state.matrix
+
+# Summary
 payload = 0.0
-tiers_used = 0
+placed = 0
 for spot in range(1, FLOOR_SPOTS + 1):
     for pid in matrix[spot - 1]:
         if pid is None:
             continue
         payload += float(products[pid].unit_weight_lbs) if pid in products else 0.0
-        tiers_used += 1
+        placed += 1
 
 st.subheader("Summary")
 st.metric("Payload (lbs)", f"{payload:,.0f}")
-st.metric("Placed tiers", f"{tiers_used:,} / {FLOOR_SPOTS*int(max_tiers):,}")
-st.caption(
-    "This optimizer mixes SKUs **by tiers** (not blocks) and alternates heavy/light vertically for better balance. "
-    "Doorway (Spots 6–9) is non-staggered; Machine Edge is blocked from 6 & 9."
-)
+st.metric("Placed tiers", f"{placed:,} / {FLOOR_SPOTS*int(max_tiers):,}")
+st.caption("Rules enforced: (1) Half Pack not allowed on TOP tier, (2) Machine Edge not allowed in Spots 6 & 9, (3) Doorway 6–9 shown on both sides.")
 
-# Hard validation: machine edge in 6/9
+# Validate half-pack top tier
 violations = []
-for spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
-    for pid in matrix[spot - 1]:
-        if pid and pid in products and products[pid].is_machine_edge:
-            violations.append(f"Machine Edge SKU {pid} is in Spot {spot} (not allowed).")
+top_tier_idx = int(max_tiers) - 1
+for spot in range(1, FLOOR_SPOTS + 1):
+    pid = matrix[spot - 1][top_tier_idx] if top_tier_idx >= 0 else None
+    if pid and pid in products and products[pid].is_half_pack:
+        violations.append(f"Half Pack on TOP tier: Spot {spot}, SKU {pid}")
 for v in violations:
     st.error(v)
 
-# Notes header for diagrams
+# Diagrams
 note = (
     f"Commodity: {commodity_selected} | Facility: {facility_selected} | "
     f"Doorway: {DOOR_START_SPOT}–{DOOR_END_SPOT} (no stagger) | "
-    f"Airbag: {gap_choice_label} @ {airbag_gap_in:.1f}\" | "
-    f"Vertical mix: heavy/light alternating"
+    f"Airbag: {gap_choice_label} @ {airbag_gap_in:.1f}\""
 )
 
-# Render diagrams
 top_svg = render_top_svg(
     car_id=car_id,
     matrix=matrix,
@@ -842,22 +780,20 @@ top_svg = render_top_svg(
     center_end=str(center_end),
 )
 
-side_a = render_side_svg(
+side_a = render_side_grid_svg(
     car_id=car_id,
     matrix=matrix,
     products=products,
-    side_name="Side A (tier-accurate)",
+    side_name="Side A (Load-Xpert grid)",
     side_filter="A",
-    inside_height_ref_in=float(inside_height_ref_in),
 )
 
-side_b = render_side_svg(
+side_b = render_side_grid_svg(
     car_id=car_id,
     matrix=matrix,
     products=products,
-    side_name="Side B (tier-accurate)",
+    side_name="Side B (Load-Xpert grid)",
     side_filter="B",
-    inside_height_ref_in=float(inside_height_ref_in),
 )
 
 st.subheader("Diagram View")
@@ -866,13 +802,13 @@ if view_mode == "Top only":
 elif view_mode == "Sides only":
     ca, cb = st.columns(2)
     with ca:
-        components.html(side_a, height=450, scrolling=False)
+        components.html(side_a, height=520, scrolling=False)
     with cb:
-        components.html(side_b, height=450, scrolling=False)
+        components.html(side_b, height=520, scrolling=False)
 else:
     components.html(top_svg, height=300, scrolling=False)
     ca, cb = st.columns(2)
     with ca:
-        components.html(side_a, height=450, scrolling=False)
+        components.html(side_a, height=520, scrolling=False)
     with cb:
-        components.html(side_b, height=450, scrolling=False)
+        components.html(side_b, height=520, scrolling=False)
