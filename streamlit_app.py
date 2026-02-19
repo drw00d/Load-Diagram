@@ -167,12 +167,10 @@ def center_out_order_outside() -> List[int]:
 
 
 def doorway_fill_order() -> List[int]:
-    # favor pockets first (7/8), then doorframe (6/9)
     return [7, 8, 6, 9]
 
 
 def blocked_spot_for_turn(turn_spot: int) -> int:
-    # TURN is mandatory and only 7 or 8; always blocks next spot
     return turn_spot + 1
 
 
@@ -181,10 +179,7 @@ def is_blocked_spot(spot: int, turn_spot: int) -> bool:
 
 
 def occupied_spots_for_placement(spot: int, turn_spot: int) -> List[int]:
-    """
-    If this is the TURN spot, it consumes spot and spot+1.
-    Otherwise, single spot. (Blocked spot never places.)
-    """
+    # TURN consumes spot and spot+1, but we keep spot+1 as blocked for placement
     if spot == turn_spot:
         return [spot, blocked_spot_for_turn(turn_spot)]
     return [spot]
@@ -244,13 +239,12 @@ def place_pid(matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: 
 
 
 # =============================
-# Hard rules (AAR-ish + doorway specifics)
+# Hard rules
 # =============================
 def can_place_pid_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot: int) -> Tuple[bool, str]:
     p = products[pid]
     occ = occupied_spots_for_placement(spot, turn_spot)
 
-    # Machine Edge: NOT allowed in doorframe spots 6/9
     if p.is_machine_edge and any(s in DOORFRAME_SPOTS_NO_MACHINE_EDGE for s in occ):
         return False, f"Machine Edge not allowed in doorframe spot(s) {sorted(set(occ) & DOORFRAME_SPOTS_NO_MACHINE_EDGE)}."
 
@@ -260,14 +254,13 @@ def can_place_pid_hard(products: Dict[str, Product], pid: str, spot: int, turn_s
 def soft_penalty(products: Dict[str, Product], pid: str, tier_idx: int, max_tiers: int) -> int:
     p = products[pid]
     penalty = 0
-    # Soft: avoid half pack on very top tier
     if p.is_half_pack and tier_idx == (max_tiers - 1):
         penalty += 100
     return penalty
 
 
 # =============================
-# Optimizer (balanced vertically, pins, soft repair)
+# Optimizer
 # =============================
 def build_token_lists(products: Dict[str, Product], requests: List[RequestLine]) -> Tuple[List[str], List[str]]:
     expanded: List[Tuple[str, float]] = []
@@ -322,7 +315,6 @@ def find_spot_for_pid_with_pins(
 ) -> Optional[int]:
     p = products[pid]
 
-    # PIN preference: Machine Edge wants 7/8 if possible
     if p.is_machine_edge:
         for s in [7, 8]:
             if is_blocked_spot(s, turn_spot):
@@ -482,13 +474,12 @@ def optimize_layout(
     if remaining > 0:
         msgs.append(f"{remaining} tiers could not be placed (capacity/rules).")
 
-    before = count_top_halfpacks(matrix, products)
     swaps = repair_reduce_top_halfpacks(matrix, products)
-    after = count_top_halfpacks(matrix, products)
+    top_hp = count_top_halfpacks(matrix, products)
     if swaps > 0:
-        msgs.append(f"Repair pass: {swaps} swap(s) to reduce Half Packs on top (before={before}, after={after}).")
+        msgs.append(f"Repair pass: {swaps} swap(s) to reduce Half Packs on top. Half Packs on top={top_hp}.")
     else:
-        msgs.append(f"Repair pass: no swaps found (Half Packs on top={after}).")
+        msgs.append(f"Repair pass: no swaps found. Half Packs on top={top_hp}.")
 
     return matrix, msgs
 
@@ -508,25 +499,16 @@ def color_for_pid(pid: str) -> str:
 
 
 def components_svg(svg: str, height: int) -> None:
-    html = f"""
-    <div style="width:100%; overflow: visible;">
-      {svg}
-    </div>
-    """
+    html = f"""<div style="width:100%; overflow: visible;">{svg}</div>"""
     components.html(html, height=height, scrolling=False)
 
 
 def auto_airbag_choice(_matrix: List[List[Optional[str]]]) -> Tuple[Tuple[int, int], float]:
-    # prefer 7–8 (most common), else 8–9, else 6–7
-    preferred = [(7, 8), (8, 9), (6, 7)]
-    for g in preferred:
-        if g in AIRBAG_ALLOWED_GAPS:
-            return g, 6.0
-    return AIRBAG_ALLOWED_GAPS[1], 6.0
+    return (7, 8), 6.0
 
 
 # =============================
-# Top view render (with merged turn column)
+# Top view render (TURN as two separate spot boxes)
 # =============================
 def render_top_svg(
     *,
@@ -588,27 +570,27 @@ def render_top_svg(
     svg.append(f'<text x="{margin+8}" y="{margin+26}" font-size="18" font-weight="600">Car: {car_id} — Top View</text>')
     svg.append(f'<text x="{margin+8}" y="{margin+52}" font-size="13">{note}</text>')
 
+    # doorway region hatch
     svg.append(f'<rect x="{door_left}" y="{y0}" width="{door_right-door_left}" height="{lane_h}" fill="url(#doorHatch)" stroke="#c00000" stroke-width="3" opacity="0.9"/>')
     svg.append(f'<text x="{door_left+6}" y="{y0-10}" font-size="12" fill="#c00000">Doorway (Spots {DOOR_START_SPOT}–{DOOR_END_SPOT})</text>')
 
+    # airbag band
     svg.append(f'<rect x="{band_x}" y="{y0}" width="{band_w}" height="{lane_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
     svg.append(f'<text x="{band_x+4}" y="{y0+lane_h+16}" font-size="12" fill="#d00000">Airbag {airbag_gap_in:.1f}" between {a}–{b}</text>')
 
-    i = 1
-    while i <= FLOOR_SPOTS:
-        if i == blocked:
-            i += 1
-            continue
+    # TURN hatch overlay (only as a light background band across the two spots; boxes stay separate)
+    turn_band_x = x0 + (turn_spot - 1) * cell_w
+    svg.append(f'<rect x="{turn_band_x}" y="{y0}" width="{cell_w*2}" height="{lane_h}" fill="url(#turnHatch)" stroke="#111" stroke-width="2" opacity="0.65"/>')
+    svg.append(f'<text x="{turn_band_x + cell_w}" y="{y0+16}" font-size="12" text-anchor="middle" fill="#111">FORKLIFT TURN ({turn_spot}–{blocked})</text>')
 
-        spot = i
-        is_turn = (spot == turn_spot)
-        span = 2 if is_turn else 1
-
+    # Draw each spot box independently (including the blocked spot visually)
+    for spot in range(1, FLOOR_SPOTS + 1):
         col = matrix[spot - 1]
         x = x0 + (spot - 1) * cell_w + cell_w * 0.08
-        bw = cell_w * span * 0.84 + cell_w * (span - 1) * 0.16
+        bw = cell_w * 0.84
 
-        if is_doorway_spot(spot) or (is_turn and any(is_doorway_spot(s) for s in [spot, blocked])):
+        # y position (stagger outside doorway only)
+        if is_doorway_spot(spot):
             y = lane_y_center - box_h / 2
             side_tag = ""
         else:
@@ -620,54 +602,59 @@ def render_top_svg(
                 y = lane_y_center - (box_h / 2) - (offset if side == "A" else -offset)
                 side_tag = side
 
+        # representative pid for fill
         rep = next((pid for pid in col if pid is not None and pid != BLOCK), None)
         fill = "#ffffff" if rep is None else color_for_pid(rep)
 
-        if is_turn:
-            svg.append(f'<rect x="{x0 + (spot-1)*cell_w}" y="{y0}" width="{cell_w*2}" height="{lane_h}" fill="url(#turnHatch)" stroke="#111" stroke-width="2" opacity="0.9"/>')
-            svg.append(f'<text x="{x0 + (spot-1)*cell_w + cell_w}" y="{y0+16}" font-size="12" text-anchor="middle" fill="#111">FORKLIFT TURN (spans {spot}–{blocked})</text>')
+        # blocked spot: show empty but with a subtle outline + label "BLOCKED"
+        if spot == blocked:
+            fill = "#ffffff"
 
         svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="{fill}" opacity="0.75" stroke="#333" stroke-width="1"/>')
 
         label = f"{spot}{side_tag}" if side_tag else f"{spot}"
-        if is_turn:
-            label = f"{spot}-{blocked}"
-        svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{label}</text>')
+        if spot == blocked:
+            svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{spot}</text>')
+            svg.append(f'<text x="{x+6}" y="{y+36}" font-size="11" fill="#555">BLOCKED</text>')
+        else:
+            svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{label}</text>')
 
-        counts: Dict[str, int] = {}
-        for pid in col:
-            if pid is None or pid == BLOCK:
-                continue
-            counts[pid] = counts.get(pid, 0) + 1
+        # counts label (not for blocked)
+        if spot != blocked:
+            counts: Dict[str, int] = {}
+            for pid in col:
+                if pid is None or pid == BLOCK:
+                    continue
+                counts[pid] = counts.get(pid, 0) + 1
 
-        if counts:
-            items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-            tooltip = " | ".join([f"{pid} x{cnt}" for pid, cnt in items])
-            svg.append(f"<title>Spot {label}: {tooltip}</title>")
+            if counts:
+                items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+                tooltip = " | ".join([f"{pid} x{cnt}" for pid, cnt in items])
+                svg.append(f"<title>Spot {label}: {tooltip}</title>")
 
-            for li, (pid, cnt) in enumerate(items[:2]):
-                hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
-                svg.append(f'<text x="{x+6}" y="{y+44 + li*16}" font-size="12" fill="#000">{pid}{hp} x{cnt}</text>')
-            if len(items) > 2:
-                svg.append(f'<text x="{x+6}" y="{y+44 + 2*16}" font-size="12" fill="#000">+{len(items)-2} more</text>')
+                for li, (pid, cnt) in enumerate(items[:2]):
+                    hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
+                    svg.append(f'<text x="{x+6}" y="{y+44 + li*16}" font-size="12" fill="#000">{pid}{hp} x{cnt}</text>')
+                if len(items) > 2:
+                    svg.append(f'<text x="{x+6}" y="{y+44 + 2*16}" font-size="12" fill="#000">+{len(items)-2} more</text>')
 
-        occ = [spot] if not is_turn else [spot, blocked]
-        if any(s in DOORFRAME_SPOTS_NO_MACHINE_EDGE for s in occ):
+        # doorframe NO Machine Edge callout
+        if spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
             svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#7a0000" stroke-width="3"/>')
             svg.append(f'<text x="{x+6}" y="{y+box_h-8}" font-size="11" fill="#7a0000">NO Machine Edge (doorframe)</text>')
 
-        top_pid = col[top_idx] if col and top_idx < len(col) else None
-        if top_pid and top_pid != BLOCK and top_pid in products and products[top_pid].is_half_pack:
-            svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#ff00aa" stroke-width="4" opacity="0.8"/>')
-
-        i += span
+        # half pack on top outline (soft)
+        if spot != blocked:
+            top_pid = col[top_idx] if col and top_idx < len(col) else None
+            if top_pid and top_pid != BLOCK and top_pid in products and products[top_pid].is_half_pack:
+                svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#ff00aa" stroke-width="4" opacity="0.8"/>')
 
     svg.append("</svg>")
     return "\n".join(svg)
 
 
 # =============================
-# Side view render (Load-Xpert-ish) with merged turn column
+# Side view render (unchanged)
 # =============================
 def render_side_loadxpert_svg(
     *,
@@ -727,9 +714,6 @@ def render_side_loadxpert_svg(
       <pattern id="doorHatch2" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
         <line x1="0" y1="0" x2="0" y2="10" stroke="#c00000" stroke-width="2" opacity="0.25"/>
       </pattern>
-      <pattern id="turnHatch2" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
-        <line x1="0" y1="0" x2="0" y2="10" stroke="#111" stroke-width="2" opacity="0.14"/>
-      </pattern>
     </defs>
     """)
     svg.append(f'<rect x="0" y="0" width="{W}" height="{H}" fill="white"/>')
@@ -749,53 +733,26 @@ def render_side_loadxpert_svg(
     svg.append(f'<text x="{door_left+6}" y="{load_y-6}" font-size="12" fill="#c00000">Doorway</text>')
     svg.append(f'<rect x="{airbag_x}" y="{load_y}" width="{band_w}" height="{load_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
 
-    i = 1
-    while i <= FLOOR_SPOTS:
-        if i == blocked:
-            i += 1
-            continue
-
-        spot = i
-        is_turn = (spot == turn_spot)
-        span = 2 if is_turn else 1
-
+    for spot in range(1, FLOOR_SPOTS + 1):
         x = load_x + (spot - 1) * cell_w
-        wcol = cell_w * span
-
-        if is_turn:
-            svg.append(f'<rect x="{x}" y="{load_y}" width="{wcol}" height="{load_h}" fill="url(#turnHatch2)" stroke="#111" stroke-width="2" opacity="0.9"/>')
-            svg.append(f'<text x="{x + wcol/2}" y="{load_y + 16}" font-size="12" text-anchor="middle" fill="#111">TURN</text>')
-
-        svg.append(f'<rect x="{x}" y="{load_y}" width="{wcol}" height="{load_h}" fill="none" stroke="#333" stroke-width="1" opacity="0.55"/>')
-
-        label = f"{spot}" if not is_turn else f"{spot}-{blocked}"
-        svg.append(f'<text x="{x + wcol/2}" y="{load_y + load_h + 18}" font-size="12" text-anchor="middle" fill="#333">{label}</text>')
+        svg.append(f'<rect x="{x}" y="{load_y}" width="{cell_w}" height="{load_h}" fill="none" stroke="#333" stroke-width="1" opacity="0.55"/>')
+        svg.append(f'<text x="{x + cell_w/2}" y="{load_y + load_h + 18}" font-size="12" text-anchor="middle" fill="#333">{spot}</text>')
 
         col = matrix[spot - 1]
         for t in range(tiers):
             pid = col[t]
             if pid is None or pid == BLOCK:
                 continue
-
             y = load_y + load_h - (t + 1) * cell_h
             fill = color_for_pid(pid)
-
-            svg.append(
-                f'<rect x="{x+1}" y="{y+1}" width="{wcol-2}" height="{cell_h-2}" '
-                f'fill="{fill}" stroke="#1a1a1a" stroke-width="1" opacity="0.95"/>'
-            )
-
+            svg.append(f'<rect x="{x+1}" y="{y+1}" width="{cell_w-2}" height="{cell_h-2}" fill="{fill}" stroke="#1a1a1a" stroke-width="1" opacity="0.95"/>')
             hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
             me = " ME" if (pid in products and products[pid].is_machine_edge) else ""
-            text = f"{pid}{hp}{me}"
-            svg.append(f'<text x="{x + wcol/2}" y="{y + cell_h/2 + 5}" font-size="13" text-anchor="middle" fill="#0a0a0a">{text}</text>')
+            svg.append(f'<text x="{x + cell_w/2}" y="{y + cell_h/2 + 5}" font-size="13" text-anchor="middle" fill="#0a0a0a">{pid}{hp}{me}</text>')
 
-        occ = [spot] if not is_turn else [spot, blocked]
-        if any(s in DOORFRAME_SPOTS_NO_MACHINE_EDGE for s in occ):
-            svg.append(f'<rect x="{x+2}" y="{load_y+2}" width="{wcol-4}" height="{load_h-4}" fill="none" stroke="#7a0000" stroke-width="4"/>')
-            svg.append(f'<text x="{x + wcol/2}" y="{load_y + 16}" font-size="11" text-anchor="middle" fill="#7a0000">NO ME</text>')
-
-        i += span
+        if spot in DOORFRAME_SPOTS_NO_MACHINE_EDGE:
+            svg.append(f'<rect x="{x+2}" y="{load_y+2}" width="{cell_w-4}" height="{load_h-4}" fill="none" stroke="#7a0000" stroke-width="4"/>')
+            svg.append(f'<text x="{x + cell_w/2}" y="{load_y + 16}" font-size="11" text-anchor="middle" fill="#7a0000">NO ME</text>')
 
     svg.append("</svg>")
     return "\n".join(svg)
@@ -813,7 +770,6 @@ except Exception as e:
 if "requests" not in st.session_state:
     st.session_state.requests: List[RequestLine] = []
 if "matrix" not in st.session_state:
-    # default mandatory turn at 7
     st.session_state.matrix = make_empty_matrix(4, 7)
 if "selected_commodity" not in st.session_state:
     st.session_state.selected_commodity = "(Select)"
@@ -846,7 +802,7 @@ with st.sidebar:
     st.header("Forklift turn (MANDATORY)")
     turn_spot = int(st.selectbox("Turn spot (must be 7 or 8)", ["7", "8"], index=0))
     blocked = blocked_spot_for_turn(turn_spot)
-    st.caption(f"Turn spans spots {turn_spot}–{blocked}. Spot {blocked} is blocked (removed).")
+    st.caption(f"Turn spans spots {turn_spot}–{blocked}. Spot {blocked} is blocked (removed for placement).")
 
     st.divider()
     st.header("Balancing preferences")
@@ -1015,11 +971,12 @@ top_half = count_top_halfpacks(matrix, products)
 if top_half > 0:
     st.warning(f"Soft rule: {top_half} Half Pack(s) ended up on the TOP tier (allowed).")
 
+blocked = blocked_spot_for_turn(turn_spot)
 note = (
     f"Commodity: {commodity_selected} | Facility: {facility_selected} | "
     f"Doorway: {DOOR_START_SPOT}–{DOOR_END_SPOT} (no stagger) | "
     f"Airbag: {airbag_gap_choice[0]}–{airbag_gap_choice[1]} @ {float(airbag_gap_in):.1f}\" | "
-    f"Turn spans {turn_spot}–{blocked_spot_for_turn(turn_spot)} (consumes 2 spots) | "
+    f"Turn spans {turn_spot}–{blocked} (consumes 2 spots) | "
     f"PIN: Machine Edge prefers 7/8 | Half Pack top = soft"
 )
 
