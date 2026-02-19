@@ -171,52 +171,41 @@ def doorway_fill_order() -> List[int]:
     return [7, 8, 6, 9]
 
 
-def blocked_spot_for_turn(turn_spot: Optional[int]) -> Optional[int]:
-    if turn_spot is None:
-        return None
-    b = turn_spot + 1
-    if 1 <= b <= FLOOR_SPOTS:
-        return b
-    return None
+def blocked_spot_for_turn(turn_spot: int) -> int:
+    # TURN is mandatory and only 7 or 8; always blocks next spot
+    return turn_spot + 1
 
 
-def is_blocked_spot(spot: int, turn_spot: Optional[int]) -> bool:
-    b = blocked_spot_for_turn(turn_spot)
-    return (b is not None and spot == b)
+def is_blocked_spot(spot: int, turn_spot: int) -> bool:
+    return spot == blocked_spot_for_turn(turn_spot)
 
 
-def occupied_spots_for_placement(spot: int, turn_spot: Optional[int]) -> List[int]:
+def occupied_spots_for_placement(spot: int, turn_spot: int) -> List[int]:
     """
     If this is the TURN spot, it consumes spot and spot+1.
     Otherwise, single spot. (Blocked spot never places.)
     """
-    if turn_spot is not None and spot == turn_spot:
-        b = blocked_spot_for_turn(turn_spot)
-        return [spot, b] if b is not None else [spot]
+    if spot == turn_spot:
+        return [spot, blocked_spot_for_turn(turn_spot)]
     return [spot]
 
 
 # =============================
 # Matrix / placement primitives
 # =============================
-def make_empty_matrix(max_tiers: int, turn_spot: Optional[int]) -> List[List[Optional[str]]]:
+def make_empty_matrix(max_tiers: int, turn_spot: int) -> List[List[Optional[str]]]:
     m = [[None for _ in range(max_tiers)] for _ in range(FLOOR_SPOTS)]
     b = blocked_spot_for_turn(turn_spot)
-    if b is not None:
-        # mark all tiers blocked in the blocked spot column
-        for t in range(max_tiers):
-            m[b - 1][t] = BLOCK
+    for t in range(max_tiers):
+        m[b - 1][t] = BLOCK
     return m
 
 
-def spot_has_capacity(matrix: List[List[Optional[str]]], spot: int, turn_spot: Optional[int]) -> bool:
-    # blocked spot never has capacity
+def spot_has_capacity(matrix: List[List[Optional[str]]], spot: int, turn_spot: int) -> bool:
     if is_blocked_spot(spot, turn_spot):
         return False
 
-    # if this is the TURN spot, it needs capacity in BOTH spots for a tier
     occ = occupied_spots_for_placement(spot, turn_spot)
-    # capacity means: exists at least one tier index where all occupied spots are empty (None)
     tiers = len(matrix[0]) if matrix else 0
     for t in range(tiers):
         ok = True
@@ -230,13 +219,13 @@ def spot_has_capacity(matrix: List[List[Optional[str]]], spot: int, turn_spot: O
     return False
 
 
-def next_empty_tier_index(matrix: List[List[Optional[str]]], spot: int, turn_spot: Optional[int]) -> Optional[int]:
+def next_empty_tier_index(matrix: List[List[Optional[str]]], spot: int, turn_spot: int) -> Optional[int]:
     if is_blocked_spot(spot, turn_spot):
         return None
 
     occ = occupied_spots_for_placement(spot, turn_spot)
     tiers = len(matrix[0]) if matrix else 0
-    for t in range(tiers):  # bottom -> top
+    for t in range(tiers):
         ok = True
         for s in occ:
             v = matrix[s - 1][t]
@@ -248,7 +237,7 @@ def next_empty_tier_index(matrix: List[List[Optional[str]]], spot: int, turn_spo
     return None
 
 
-def place_pid(matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: str, turn_spot: Optional[int]) -> None:
+def place_pid(matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: str, turn_spot: int) -> None:
     occ = occupied_spots_for_placement(spot, turn_spot)
     for s in occ:
         matrix[s - 1][tier_idx] = pid
@@ -257,7 +246,7 @@ def place_pid(matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: 
 # =============================
 # Hard rules (AAR-ish + doorway specifics)
 # =============================
-def can_place_pid_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot: Optional[int]) -> Tuple[bool, str]:
+def can_place_pid_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot: int) -> Tuple[bool, str]:
     p = products[pid]
     occ = occupied_spots_for_placement(spot, turn_spot)
 
@@ -304,7 +293,7 @@ def pop_best_placeable(
     spot: int,
     tier_idx: int,
     max_tiers: int,
-    turn_spot: Optional[int],
+    turn_spot: int,
 ) -> Optional[str]:
     best_i = None
     best_score = None
@@ -329,7 +318,7 @@ def find_spot_for_pid_with_pins(
     pid: str,
     tier_idx: int,
     base_order: List[int],
-    turn_spot: Optional[int],
+    turn_spot: int,
 ) -> Optional[int]:
     p = products[pid]
 
@@ -345,7 +334,6 @@ def find_spot_for_pid_with_pins(
             if ok:
                 return s
 
-    # otherwise choose first feasible
     for s in base_order:
         if is_blocked_spot(s, turn_spot):
             continue
@@ -390,7 +378,6 @@ def repair_reduce_top_halfpacks(matrix: List[List[Optional[str]]], products: Dic
         if not hp_pid or hp_pid == BLOCK:
             continue
 
-        # Try swap within same spot
         for t in range(top - 1, -1, -1):
             below = matrix[spot - 1][t]
             if not is_full(below):
@@ -403,7 +390,6 @@ def repair_reduce_top_halfpacks(matrix: List[List[Optional[str]]], products: Dic
         if hp_pid is None:
             continue
 
-        # Try swap with another spot below-top
         swapped = False
         for other_spot in range(1, FLOOR_SPOTS + 1):
             if other_spot == spot:
@@ -428,7 +414,7 @@ def optimize_layout(
     requests: List[RequestLine],
     max_tiers_per_spot: int,
     preferred_side_outside: str,
-    turn_spot: Optional[int],
+    turn_spot: int,
 ) -> Tuple[List[List[Optional[str]]], List[str]]:
     msgs: List[str] = []
 
@@ -443,19 +429,14 @@ def optimize_layout(
         outside_order = pref + other
 
     base_order = outside_order + doorway_fill_order()
-
-    # remove blocked spot from ordering if turn is enabled
     base_order = [s for s in base_order if not is_blocked_spot(s, turn_spot)]
 
     matrix = make_empty_matrix(max_tiers_per_spot, turn_spot)
 
     def tier_pref_group(tier_idx: int) -> str:
-        # bottom tier prefers heavy, then alternate
         return "heavy" if (tier_idx % 2 == 0) else "light"
 
-    # main placement loop
     while (heavy or light) and any(spot_has_capacity(matrix, s, turn_spot) for s in range(1, FLOOR_SPOTS + 1)):
-        # choose next spot to fill (least filled, in base order)
         best_spot = None
         best_fill = None
         for s in base_order:
@@ -486,7 +467,6 @@ def optimize_layout(
             msgs.append(f"Could not place any remaining tiers at Tier {tier_idx+1} due to constraints/capacity.")
             break
 
-        # PIN preference can move it to 7/8
         pinned = find_spot_for_pid_with_pins(matrix, products, pid, tier_idx, base_order, turn_spot)
         if pinned is not None:
             best_spot = pinned
@@ -505,7 +485,6 @@ def optimize_layout(
     before = count_top_halfpacks(matrix, products)
     swaps = repair_reduce_top_halfpacks(matrix, products)
     after = count_top_halfpacks(matrix, products)
-
     if swaps > 0:
         msgs.append(f"Repair pass: {swaps} swap(s) to reduce Half Packs on top (before={before}, after={after}).")
     else:
@@ -559,7 +538,7 @@ def render_top_svg(
     airbag_gap_choice: Tuple[int, int],
     unit_length_ref_in: float,
     center_end: str,
-    turn_spot: Optional[int],
+    turn_spot: int,
 ) -> str:
     W, H = 1200, 310
     margin = 30
@@ -577,11 +556,9 @@ def render_top_svg(
     frac = 0.0 if unit_length_ref_in <= 0 else (float(airbag_gap_in) / float(unit_length_ref_in))
     band_w = max(8.0, min(cell_w * 0.9, cell_w * frac))
 
-    # Doorway bounds (still 6–9)
     door_left = x0 + (DOOR_START_SPOT - 1) * cell_w
     door_right = x0 + DOOR_END_SPOT * cell_w
 
-    # Airbag band
     a, b = airbag_gap_choice
     center_x = x0 + a * cell_w
     band_x = center_x - band_w / 2
@@ -619,19 +596,18 @@ def render_top_svg(
 
     i = 1
     while i <= FLOOR_SPOTS:
-        if blocked is not None and i == blocked:
+        if i == blocked:
             i += 1
             continue
 
         spot = i
-        is_turn = (turn_spot is not None and spot == turn_spot and blocked is not None)
+        is_turn = (spot == turn_spot)
         span = 2 if is_turn else 1
 
         col = matrix[spot - 1]
         x = x0 + (spot - 1) * cell_w + cell_w * 0.08
-        bw = cell_w * span * 0.84 + cell_w * (span - 1) * 0.16  # keep visual spacing similar
+        bw = cell_w * span * 0.84 + cell_w * (span - 1) * 0.16
 
-        # vertical placement: stagger outside doorway only; doorway stays centered
         if is_doorway_spot(spot) or (is_turn and any(is_doorway_spot(s) for s in [spot, blocked])):
             y = lane_y_center - box_h / 2
             side_tag = ""
@@ -647,7 +623,6 @@ def render_top_svg(
         rep = next((pid for pid in col if pid is not None and pid != BLOCK), None)
         fill = "#ffffff" if rep is None else color_for_pid(rep)
 
-        # turn column visual hatch
         if is_turn:
             svg.append(f'<rect x="{x0 + (spot-1)*cell_w}" y="{y0}" width="{cell_w*2}" height="{lane_h}" fill="url(#turnHatch)" stroke="#111" stroke-width="2" opacity="0.9"/>')
             svg.append(f'<text x="{x0 + (spot-1)*cell_w + cell_w}" y="{y0+16}" font-size="12" text-anchor="middle" fill="#111">FORKLIFT TURN (spans {spot}–{blocked})</text>')
@@ -659,7 +634,6 @@ def render_top_svg(
             label = f"{spot}-{blocked}"
         svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{label}</text>')
 
-        # counts by SKU in the spot (tier-mix)
         counts: Dict[str, int] = {}
         for pid in col:
             if pid is None or pid == BLOCK:
@@ -677,13 +651,11 @@ def render_top_svg(
             if len(items) > 2:
                 svg.append(f'<text x="{x+6}" y="{y+44 + 2*16}" font-size="12" fill="#000">+{len(items)-2} more</text>')
 
-        # Doorframe "NO ME" overlay if this spot (or its turned span) includes 6/9
         occ = [spot] if not is_turn else [spot, blocked]
         if any(s in DOORFRAME_SPOTS_NO_MACHINE_EDGE for s in occ):
             svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#7a0000" stroke-width="3"/>')
             svg.append(f'<text x="{x+6}" y="{y+box_h-8}" font-size="11" fill="#7a0000">NO Machine Edge (doorframe)</text>')
 
-        # Soft top-tier half pack highlight (pink)
         top_pid = col[top_idx] if col and top_idx < len(col) else None
         if top_pid and top_pid != BLOCK and top_pid in products and products[top_pid].is_half_pack:
             svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{box_h}" fill="none" stroke="#ff00aa" stroke-width="4" opacity="0.8"/>')
@@ -706,7 +678,7 @@ def render_side_loadxpert_svg(
     airbag_gap_choice: Tuple[int, int],
     airbag_gap_in: float,
     unit_length_ref_in: float,
-    turn_spot: Optional[int],
+    turn_spot: int,
 ) -> str:
     tiers = len(matrix[0]) if matrix else 0
 
@@ -740,9 +712,10 @@ def render_side_loadxpert_svg(
 
     blocked = blocked_spot_for_turn(turn_spot)
 
-    subtitle = f"Car: {car_id} • Doorway {DOOR_START_SPOT}–{DOOR_END_SPOT} • Airbag {a}–{b} @ {airbag_gap_in:.1f}\""
-    if turn_spot is not None and blocked is not None:
-        subtitle += f" • Turn spans {turn_spot}–{blocked}"
+    subtitle = (
+        f"Car: {car_id} • Doorway {DOOR_START_SPOT}–{DOOR_END_SPOT} • "
+        f"Airbag {a}–{b} @ {airbag_gap_in:.1f}\" • Turn spans {turn_spot}–{blocked}"
+    )
 
     svg = []
     svg.append(
@@ -764,45 +737,40 @@ def render_side_loadxpert_svg(
     svg.append(f'<text x="{margin}" y="{margin+26}" font-size="20" font-weight="700">{title}</text>')
     svg.append(f'<text x="{margin}" y="{margin+52}" font-size="14" fill="#333">{subtitle}</text>')
 
-    # outer car
     svg.append(f'<rect x="{x0}" y="{y0}" width="{car_w}" height="{car_h}" fill="none" stroke="#0b2a7a" stroke-width="4"/>')
 
-    # wheels
     wheel_y = y0 + car_h - 12
     svg.append(f'<circle cx="{x0+car_w*0.22}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
     svg.append(f'<circle cx="{x0+car_w*0.28}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
     svg.append(f'<circle cx="{x0+car_w*0.72}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
     svg.append(f'<circle cx="{x0+car_w*0.78}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
 
-    # doorway and airbag
     svg.append(f'<rect x="{door_left}" y="{load_y}" width="{door_right-door_left}" height="{load_h}" fill="url(#doorHatch2)" stroke="#c00000" stroke-width="3"/>')
     svg.append(f'<text x="{door_left+6}" y="{load_y-6}" font-size="12" fill="#c00000">Doorway</text>')
     svg.append(f'<rect x="{airbag_x}" y="{load_y}" width="{band_w}" height="{load_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
 
-    # Draw columns; if turn spot, merge width and skip blocked
     i = 1
     while i <= FLOOR_SPOTS:
-        if blocked is not None and i == blocked:
+        if i == blocked:
             i += 1
             continue
 
         spot = i
-        is_turn = (turn_spot is not None and blocked is not None and spot == turn_spot)
+        is_turn = (spot == turn_spot)
         span = 2 if is_turn else 1
 
         x = load_x + (spot - 1) * cell_w
         wcol = cell_w * span
 
-        # column outline + label
         if is_turn:
             svg.append(f'<rect x="{x}" y="{load_y}" width="{wcol}" height="{load_h}" fill="url(#turnHatch2)" stroke="#111" stroke-width="2" opacity="0.9"/>')
             svg.append(f'<text x="{x + wcol/2}" y="{load_y + 16}" font-size="12" text-anchor="middle" fill="#111">TURN</text>')
+
         svg.append(f'<rect x="{x}" y="{load_y}" width="{wcol}" height="{load_h}" fill="none" stroke="#333" stroke-width="1" opacity="0.55"/>')
 
         label = f"{spot}" if not is_turn else f"{spot}-{blocked}"
         svg.append(f'<text x="{x + wcol/2}" y="{load_y + load_h + 18}" font-size="12" text-anchor="middle" fill="#333">{label}</text>')
 
-        # tier blocks (use spot's matrix; for turn it represents both)
         col = matrix[spot - 1]
         for t in range(tiers):
             pid = col[t]
@@ -822,7 +790,6 @@ def render_side_loadxpert_svg(
             text = f"{pid}{hp}{me}"
             svg.append(f'<text x="{x + wcol/2}" y="{y + cell_h/2 + 5}" font-size="13" text-anchor="middle" fill="#0a0a0a">{text}</text>')
 
-        # Doorframe NO ME markers for 6/9 (and for turn span if it touches 6/9)
         occ = [spot] if not is_turn else [spot, blocked]
         if any(s in DOORFRAME_SPOTS_NO_MACHINE_EDGE for s in occ):
             svg.append(f'<rect x="{x+2}" y="{load_y+2}" width="{wcol-4}" height="{load_h-4}" fill="none" stroke="#7a0000" stroke-width="4"/>')
@@ -846,7 +813,8 @@ except Exception as e:
 if "requests" not in st.session_state:
     st.session_state.requests: List[RequestLine] = []
 if "matrix" not in st.session_state:
-    st.session_state.matrix = make_empty_matrix(4, None)
+    # default mandatory turn at 7
+    st.session_state.matrix = make_empty_matrix(4, 7)
 if "selected_commodity" not in st.session_state:
     st.session_state.selected_commodity = "(Select)"
 if "selected_facility" not in st.session_state:
@@ -870,19 +838,15 @@ with st.sidebar:
 
     gap_labels = [f"{a}–{b}" for a, b in AIRBAG_ALLOWED_GAPS]
     gap_choice_label = st.selectbox("Airbag location (manual)", gap_labels, index=1, disabled=auto_airbag)
-    airbag_gap_in = st.slider("Airbag gap (in) (manual)", 6.0, 9.0, 9.0, 0.5, disabled=auto_airbag)
+    airbag_gap_in = st.slider("Airbag gap (in) (manual)", 6.0, 9.0, 6.0, 0.5, disabled=auto_airbag)
 
     unit_length_ref_in = st.number_input("Unit length ref (in) for gap drawing", min_value=1.0, value=96.0, step=1.0)
 
     st.divider()
-    st.header("Forklift turn")
-    # IMPORTANT: turn consumes 2 spots (N and N+1)
-    turn_spot_label = st.selectbox("Turn (horizontal) spot (consumes 2 spots)", ["None", "7", "8"], index=1)
-    turn_spot = None if turn_spot_label == "None" else int(turn_spot_label)
-
-    if turn_spot is not None:
-        b = blocked_spot_for_turn(turn_spot)
-        st.caption(f"Turn spans spots {turn_spot}–{b}. Spot {b} will be blocked.")
+    st.header("Forklift turn (MANDATORY)")
+    turn_spot = int(st.selectbox("Turn spot (must be 7 or 8)", ["7", "8"], index=0))
+    blocked = blocked_spot_for_turn(turn_spot)
+    st.caption(f"Turn spans spots {turn_spot}–{blocked}. Spot {blocked} is blocked (removed).")
 
     st.divider()
     st.header("Balancing preferences")
@@ -1003,9 +967,7 @@ if st.session_state.requests:
     req_rows = []
     for r in st.session_state.requests:
         p = products.get(r.product_id)
-        req_rows.append(
-            {"Sales Product Id": r.product_id, "Description": (p.description if p else ""), "Tiers": r.tiers}
-        )
+        req_rows.append({"Sales Product Id": r.product_id, "Description": (p.description if p else ""), "Tiers": r.tiers})
     st.dataframe(pd.DataFrame(req_rows), use_container_width=True, height=200)
 else:
     st.info("Add one or more SKU lines, then click **Optimize Layout**.")
@@ -1031,13 +993,11 @@ for m in messages:
 
 matrix = st.session_state.matrix
 
-# Auto airbag after we have matrix (if enabled)
 if auto_airbag:
     airbag_gap_choice, airbag_gap_in = auto_airbag_choice(matrix)
 else:
     airbag_gap_choice = AIRBAG_ALLOWED_GAPS[[f"{a}–{b}" for a, b in AIRBAG_ALLOWED_GAPS].index(gap_choice_label)]
 
-# Payload / placed tiers
 payload = 0.0
 placed = 0
 for spot in range(1, FLOOR_SPOTS + 1):
@@ -1055,26 +1015,13 @@ top_half = count_top_halfpacks(matrix, products)
 if top_half > 0:
     st.warning(f"Soft rule: {top_half} Half Pack(s) ended up on the TOP tier (allowed).")
 
-# Hard Machine Edge violations (doorframe 6/9, and turn span touching 9)
-for spot in range(1, FLOOR_SPOTS + 1):
-    if is_blocked_spot(spot, turn_spot):
-        continue
-    for pid in matrix[spot - 1]:
-        if not pid or pid == BLOCK:
-            continue
-        if pid in products and products[pid].is_machine_edge:
-            ok, why = can_place_pid_hard(products, pid, spot, turn_spot)
-            if not ok:
-                st.error(f"HARD violation: {pid} in Spot {spot}: {why}")
-
 note = (
     f"Commodity: {commodity_selected} | Facility: {facility_selected} | "
     f"Doorway: {DOOR_START_SPOT}–{DOOR_END_SPOT} (no stagger) | "
     f"Airbag: {airbag_gap_choice[0]}–{airbag_gap_choice[1]} @ {float(airbag_gap_in):.1f}\" | "
+    f"Turn spans {turn_spot}–{blocked_spot_for_turn(turn_spot)} (consumes 2 spots) | "
     f"PIN: Machine Edge prefers 7/8 | Half Pack top = soft"
 )
-if turn_spot is not None and blocked_spot_for_turn(turn_spot) is not None:
-    note += f" | Turn spans {turn_spot}–{blocked_spot_for_turn(turn_spot)} (consumes 2 spots)"
 
 top_svg = render_top_svg(
     car_id=car_id,
