@@ -94,7 +94,6 @@ def load_product_master(path: str) -> pd.DataFrame:
     df = pd.read_excel(path, engine="openpyxl")
     df.columns = [c.strip() for c in df.columns]
 
-    # If Short Descrip isn't present, fall back to Descrip
     global COL_DESC
     if COL_DESC not in df.columns and "Descrip" in df.columns:
         COL_DESC = "Descrip"
@@ -173,7 +172,6 @@ def is_blocked_spot(spot: int, turn_spot: int) -> bool:
 
 
 def occupied_spots_for_placement(spot: int, turn_spot: int) -> List[int]:
-    # Turn consumes 2 spots: [turn_spot, turn_spot+1]
     if spot == turn_spot:
         return [spot, blocked_spot_for_turn(turn_spot)]
     return [spot]
@@ -186,7 +184,7 @@ def make_empty_matrix(max_tiers: int, turn_spot: int) -> List[List[Optional[str]
     m = [[None for _ in range(max_tiers)] for _ in range(FLOOR_SPOTS)]
     b = blocked_spot_for_turn(turn_spot)
     for t in range(max_tiers):
-        m[b - 1][t] = BLOCK
+        m[b - 1][t] = BLOCK  # visually blocked
     return m
 
 
@@ -213,7 +211,6 @@ def can_place_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot:
     p = products[pid]
     occ = occupied_spots_for_placement(spot, turn_spot)
 
-    # Machine Edge ban in doorframe 6/9, including TURN placements that touch them
     if p.is_machine_edge and any(s in DOORFRAME_NO_ME for s in occ):
         return False, "Machine Edge not allowed in doorframe spots 6/9 (or any placement that touches them)."
 
@@ -221,16 +218,15 @@ def can_place_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot:
 
 
 def soft_penalty(products: Dict[str, Product], pid: str, tier_idx: int, max_tiers: int) -> int:
-    # Half-pack on TOP is soft penalty
     p = products[pid]
     penalty = 0
     if p.is_half_pack and tier_idx == (max_tiers - 1):
-        penalty += 100
+        penalty += 100  # soft
     return penalty
 
 
 # =============================
-# Optimization (simple but stable)
+# Optimization helpers
 # =============================
 def build_token_lists(products: Dict[str, Product], requests: List[RequestLine]) -> Tuple[List[str], List[str]]:
     expanded: List[Tuple[str, float]] = []
@@ -268,12 +264,56 @@ def pop_best(tokens: List[str], products: Dict[str, Product], spot: int, tier_id
     return tokens.pop(best_i)
 
 
-def optimize_layout(products: Dict[str, Product], requests: List[RequestLine], max_tiers: int, turn_spot: int) -> Tuple[List[List[Optional[str]]], List[str]]:
+def force_turn_tiers(
+    matrix: List[List[Optional[str]]],
+    products: Dict[str, Product],
+    heavy: List[str],
+    light: List[str],
+    max_tiers: int,
+    turn_spot: int,
+    required_turn_tiers: int,
+    msgs: List[str],
+) -> None:
+    """
+    HARD RULE: ensure at least `required_turn_tiers` placements occur in the TURN spot.
+    Each such placement consumes BOTH turn_spot and turn_spot+1 at that tier.
+    """
+    required_turn_tiers = max(0, min(required_turn_tiers, max_tiers))
+    for t in range(required_turn_tiers):
+        # If already filled (e.g., rerun), skip
+        if matrix[turn_spot - 1][t] not in (None, BLOCK):
+            continue
+
+        # Prefer placing something legal; alternate heavy/light for vertical balance
+        pref = "heavy" if (t % 2 == 0) else "light"
+        pid = None
+        if pref == "heavy":
+            pid = pop_best(heavy, products, turn_spot, t, max_tiers, turn_spot) or pop_best(light, products, turn_spot, t, max_tiers, turn_spot)
+        else:
+            pid = pop_best(light, products, turn_spot, t, max_tiers, turn_spot) or pop_best(heavy, products, turn_spot, t, max_tiers, turn_spot)
+
+        if pid is None:
+            msgs.append(f"TURN HARD RULE: could not place a legal tier into TURN spot at Tier {t+1}.")
+            return
+
+        place_pid(matrix, turn_spot, t, pid, turn_spot)
+
+
+def optimize_layout(
+    products: Dict[str, Product],
+    requests: List[RequestLine],
+    max_tiers: int,
+    turn_spot: int,
+    required_turn_tiers: int,
+) -> Tuple[List[List[Optional[str]]], List[str]]:
     msgs: List[str] = []
     heavy, light = build_token_lists(products, requests)
     matrix = make_empty_matrix(max_tiers, turn_spot)
 
-    # Fill order: outside doorway, then 7/8, then 6/9
+    # HARD: force TURN usage first
+    force_turn_tiers(matrix, products, heavy, light, max_tiers, turn_spot, required_turn_tiers, msgs)
+
+    # Fill order: outside doorway, then remaining doorway spots
     outside = [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]
     doorway = [7, 8, 6, 9]
     order = [s for s in outside + doorway if not is_blocked_spot(s, turn_spot)]
@@ -350,8 +390,6 @@ def auto_airbag_choice() -> Tuple[Tuple[int, int], float]:
 
 # =============================
 # TOP VIEW
-# - Normal spots: one tall "column" block (just visual)
-# - TURN spot (7 or 8): each tier draws ONE wide horizontal block spanning spots 7-8
 # =============================
 def render_top_svg(
     *,
@@ -385,7 +423,6 @@ def render_top_svg(
     airbag_x_center = x0 + a * cell_w
     band_x = airbag_x_center - band_w / 2
 
-    # Base spot box
     box_h = lane_h * 0.72
     box_y = y0 + (lane_h - box_h) / 2
 
@@ -414,11 +451,9 @@ def render_top_svg(
     svg.append(f'<text x="{margin+10}" y="{margin+30}" font-size="18" font-weight="700">Car: {car_id} — Top View</text>')
     svg.append(f'<text x="{margin+10}" y="{margin+58}" font-size="13">{note}</text>')
 
-    # doorway hatch band
     svg.append(f'<rect x="{door_left}" y="{y0}" width="{door_right-door_left}" height="{lane_h}" fill="url(#doorHatch)" stroke="#c00000" stroke-width="3"/>')
     svg.append(f'<text x="{door_left+6}" y="{y0-8}" font-size="12" fill="#c00000">Doorway (Spots {DOOR_START_SPOT}-{DOOR_END_SPOT})</text>')
 
-    # airbag band
     svg.append(f'<rect x="{band_x}" y="{y0}" width="{band_w}" height="{lane_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
     svg.append(f'<text x="{band_x+4}" y="{y0+lane_h+16}" font-size="12" fill="#d00000">Airbag {airbag_gap_in:.1f}" between {a}-{b}</text>')
 
@@ -427,7 +462,6 @@ def render_top_svg(
     svg.append(f'<rect x="{tzx}" y="{y0}" width="{cell_w*2}" height="{lane_h}" fill="url(#turnHatch)" stroke="#111" stroke-width="2"/>')
     svg.append(f'<text x="{tzx + cell_w}" y="{y0+16}" font-size="12" text-anchor="middle">FORKLIFT TURN ({turn_spot}-{blocked})</text>')
 
-    # draw base spot boxes (skip blocked label fill)
     for s in range(1, FLOOR_SPOTS + 1):
         x, y, bw, bh = spot_rect[s]
         col = matrix[s - 1]
@@ -457,12 +491,9 @@ def render_top_svg(
 
         for t, pid in turn_tiers:
             y_bar = y1 + bh1 - (t + 1) * tier_h
-
             fill = color_for_pid(pid)
             svg.append(f'<rect x="{span_x}" y="{y_bar}" width="{span_w}" height="{tier_h}" fill="{fill}" opacity="0.92" stroke="#111" stroke-width="1"/>')
-            # Add "TURN" label to make it obvious this row is rotated
             svg.append(f'<text x="{span_x + 10}" y="{y_bar + tier_h/2 + 5}" font-size="12" font-weight="700" fill="#111">TURN</text>')
-
             hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
             svg.append(f'<text x="{span_x + span_w/2}" y="{y_bar + tier_h/2 + 5}" font-size="12" text-anchor="middle">{pid}{hp}</text>')
 
@@ -473,9 +504,7 @@ def render_top_svg(
 
 
 # =============================
-# SIDE VIEW (Load Xpert style)
-# - Draw grid 1..15 and tiers
-# - TURN tiers render as ONE merged wide rectangle across turn_spot and blocked spot
+# SIDE VIEW
 # =============================
 def render_side_svg(
     *,
@@ -537,16 +566,13 @@ def render_side_svg(
 
     svg.append(f'<rect x="{x0}" y="{y0}" width="{car_w}" height="{car_h}" fill="none" stroke="#0b2a7a" stroke-width="4"/>')
 
-    # wheels
     wheel_y = y0 + car_h - 12
     for cx in [x0+car_w*0.22, x0+car_w*0.28, x0+car_w*0.72, x0+car_w*0.78]:
         svg.append(f'<circle cx="{cx}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
 
-    # doorway + airbag
     svg.append(f'<rect x="{door_left}" y="{load_y}" width="{door_right-door_left}" height="{load_h}" fill="url(#doorHatch2)" stroke="#c00000" stroke-width="3"/>')
     svg.append(f'<rect x="{airbag_x}" y="{load_y}" width="{band_w}" height="{load_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
 
-    # spot vertical grid and bottom numbers
     for spot in range(1, FLOOR_SPOTS + 1):
         x = load_x + (spot - 1) * cell_w
         svg.append(f'<rect x="{x}" y="{load_y}" width="{cell_w}" height="{load_h}" fill="none" stroke="#333" stroke-width="1" opacity="0.55"/>')
@@ -556,7 +582,6 @@ def render_side_svg(
             svg.append(f'<rect x="{x+2}" y="{load_y+2}" width="{cell_w-4}" height="{load_h-4}" fill="none" stroke="#7a0000" stroke-width="4"/>')
             svg.append(f'<text x="{x + cell_w/2}" y="{load_y + 16}" font-size="11" text-anchor="middle" fill="#7a0000">NO ME</text>')
 
-    # Draw normal cells, but SKIP blocked spot when it is part of a TURN tier (we'll draw merged wide block instead)
     for spot in range(1, FLOOR_SPOTS + 1):
         col = matrix[spot - 1]
         x = load_x + (spot - 1) * cell_w
@@ -566,8 +591,6 @@ def render_side_svg(
             if pid is None or pid == BLOCK:
                 continue
 
-            # If this is the blocked spot, and the TURN spot at same tier has same pid,
-            # skip drawing here (merged block will be drawn from TURN spot).
             if spot == blocked:
                 pid_turn = matrix[turn_spot - 1][t]
                 if pid_turn == pid:
@@ -579,7 +602,7 @@ def render_side_svg(
             hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
             svg.append(f'<text x="{x + cell_w/2}" y="{y + cell_h/2 + 5}" font-size="13" text-anchor="middle" fill="#0a0a0a">{pid}{hp}</text>')
 
-    # TURN tiers render: merged wide rectangles across turn_spot + blocked
+    # TURN tiers render merged
     turn_col = matrix[turn_spot - 1]
     for t in range(tiers):
         pid = turn_col[t]
@@ -622,6 +645,11 @@ with st.sidebar:
     # Turn spot MUST be 7 or 8
     turn_spot = int(st.selectbox("Turn spot (must be 7 or 8)", ["7", "8"], index=0))
 
+    # HARD RULE: how many tiers must be turned in the turn spot
+    required_turn_tiers = st.slider("Turn tiers required (HARD)", 1, 8, int(max_tiers))
+    if required_turn_tiers > max_tiers:
+        required_turn_tiers = max_tiers
+
     unit_length_ref_in = st.number_input("Unit length ref (in) for gap drawing", min_value=1.0, value=96.0, step=1.0)
 
     auto_airbag = st.checkbox('Auto airbag (prefer <= 9")', value=True)
@@ -637,7 +665,6 @@ with st.sidebar:
 
 st.success(f"Product Master loaded: {len(pm):,} rows")
 
-# Filters
 commodities = sorted(pm[COL_COMMODITY].dropna().astype(str).unique().tolist())
 commodity_selected = st.selectbox("Commodity / Product Type (required)", ["(Select)"] + commodities)
 if commodity_selected == "(Select)":
@@ -661,7 +688,6 @@ if search.strip():
         | (pm_cf[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_cf.columns else False)
     ].copy()
 
-# Sort and dedupe IDs
 sort_cols, ascending = [], []
 if COL_THICK in pm_cf.columns:
     sort_cols.append(COL_THICK); ascending.append(False)
@@ -686,7 +712,6 @@ def option_label(r: dict) -> str:
     pcs = r.get(COL_PIECECOUNT)
     wt = r.get(COL_UNIT_WT)
 
-    hp = ""
     if COL_HALF_PACK in pm_cf.columns:
         hp = " HP" if _truthy(r.get(COL_HALF_PACK, "")) else ""
     else:
@@ -698,7 +723,7 @@ def option_label(r: dict) -> str:
     if pd.notna(width): dims.append(f'{float(width):g}')
     if pd.notna(length): dims.append(f'{float(length):g}')
     if dims:
-        parts.append(" x ".join(dims))  # ASCII x only
+        parts.append(" x ".join(dims))
     if pd.notna(pcs):
         parts.append(f"{int(pcs)} pcs")
     if pd.notna(wt):
@@ -731,7 +756,6 @@ if add_line and selected_label:
     pid = str(options[idx][COL_PRODUCT_ID]).strip()
     st.session_state.requests.append(RequestLine(product_id=pid, tiers=int(tiers_to_add)))
 
-# Requested table w/ description
 st.subheader("Requested SKUs (tiers)")
 products: Dict[str, Product] = {}
 for r in st.session_state.requests:
@@ -744,13 +768,7 @@ if st.session_state.requests:
     rows = []
     for r in st.session_state.requests:
         p = products.get(r.product_id)
-        rows.append(
-            {
-                "Sales Product Id": r.product_id,
-                "Description": p.description if p else "",
-                "Tiers": r.tiers,
-            }
-        )
+        rows.append({"Sales Product Id": r.product_id, "Description": p.description if p else "", "Tiers": r.tiers})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, height=220)
 else:
     st.info("Add one or more SKUs, then click Optimize Layout.")
@@ -760,7 +778,7 @@ if optimize_btn:
     if not st.session_state.requests:
         st.warning("No request lines to optimize.")
     else:
-        matrix, msgs = optimize_layout(products, st.session_state.requests, int(max_tiers), turn_spot)
+        matrix, msgs = optimize_layout(products, st.session_state.requests, int(max_tiers), turn_spot, int(required_turn_tiers))
         st.session_state.matrix = matrix
 
 for m in msgs:
@@ -768,7 +786,6 @@ for m in msgs:
 
 matrix = st.session_state.matrix
 
-# Summary
 payload = 0.0
 placed = 0
 for spot in range(1, FLOOR_SPOTS + 1):
@@ -786,7 +803,7 @@ note = (
     f"Commodity: {commodity_selected} | Facility: {facility_selected} | "
     f"Doorway: {DOOR_START_SPOT}-{DOOR_END_SPOT} | "
     f"Airbag: {airbag_gap_choice[0]}-{airbag_gap_choice[1]} @ {airbag_gap_in:.1f}\" | "
-    f"Turn spans {turn_spot}-{blocked} (consumes 2 spots)"
+    f"Turn spans {turn_spot}-{blocked} (consumes 2 spots) | Turn tiers required: {required_turn_tiers}"
 )
 
 top_svg = render_top_svg(
