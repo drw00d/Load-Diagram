@@ -213,6 +213,7 @@ def can_place_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot:
     p = products[pid]
     occ = occupied_spots_for_placement(spot, turn_spot)
 
+    # Machine Edge ban in doorframe 6/9, including TURN placements that touch them
     if p.is_machine_edge and any(s in DOORFRAME_NO_ME for s in occ):
         return False, "Machine Edge not allowed in doorframe spots 6/9 (or any placement that touches them)."
 
@@ -272,7 +273,7 @@ def optimize_layout(products: Dict[str, Product], requests: List[RequestLine], m
     heavy, light = build_token_lists(products, requests)
     matrix = make_empty_matrix(max_tiers, turn_spot)
 
-    # Fill order: outside doorway, then 7/8, then 6/9, then rest
+    # Fill order: outside doorway, then 7/8, then 6/9
     outside = [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]
     doorway = [7, 8, 6, 9]
     order = [s for s in outside + doorway if not is_blocked_spot(s, turn_spot)]
@@ -298,7 +299,7 @@ def optimize_layout(products: Dict[str, Product], requests: List[RequestLine], m
             if pid is None:
                 continue
 
-            # PIN preference: if Machine Edge, try to move it into 7/8 if possible at same tier
+            # PIN preference: if Machine Edge, try 7/8 at same tier
             if products[pid].is_machine_edge:
                 for pin_spot in [7, 8]:
                     if is_blocked_spot(pin_spot, turn_spot):
@@ -348,7 +349,9 @@ def auto_airbag_choice() -> Tuple[Tuple[int, int], float]:
 
 
 # =============================
-# Top View (TURN = horizontal tier bars spanning 2 spots)
+# TOP VIEW
+# - Normal spots: one tall "column" block (just visual)
+# - TURN spot (7 or 8): each tier draws ONE wide horizontal block spanning spots 7-8
 # =============================
 def render_top_svg(
     *,
@@ -361,9 +364,9 @@ def render_top_svg(
     airbag_gap_in: float,
     unit_length_ref_in: float,
 ) -> str:
-    W, H = 1200, 340
+    W, H = 1400, 360
     margin = 26
-    header_h = 80
+    header_h = 85
 
     x0, y0 = margin, margin + header_h
     w = W - 2 * margin
@@ -373,19 +376,17 @@ def render_top_svg(
     tiers = len(matrix[0]) if matrix else 0
     blocked = blocked_spot_for_turn(turn_spot)
 
-    # doorway region
     door_left = x0 + (DOOR_START_SPOT - 1) * cell_w
     door_right = x0 + DOOR_END_SPOT * cell_w
 
-    # airbag band
     a, b = airbag_gap_choice
     frac = (airbag_gap_in / unit_length_ref_in) if unit_length_ref_in > 0 else 0.06
     band_w = max(8.0, min(cell_w * 0.9, cell_w * frac))
     airbag_x_center = x0 + a * cell_w
     band_x = airbag_x_center - band_w / 2
 
-    # spot rectangles (simple centered boxes)
-    box_h = lane_h * 0.7
+    # Base spot box
+    box_h = lane_h * 0.72
     box_y = y0 + (lane_h - box_h) / 2
 
     spot_rect: Dict[int, Tuple[float, float, float, float]] = {}
@@ -394,7 +395,6 @@ def render_top_svg(
         bw = cell_w * 0.84
         spot_rect[s] = (x, box_y, bw, box_h)
 
-    # which tiers exist in TURN spot
     turn_col = matrix[turn_spot - 1]
     turn_tiers = [(t, pid) for t, pid in enumerate(turn_col) if pid and pid != BLOCK]
 
@@ -403,31 +403,31 @@ def render_top_svg(
     svg.append("""
     <defs>
       <pattern id="doorHatch" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
-        <line x1="0" y1="0" x2="0" y2="8" stroke="#c00000" stroke-width="2" opacity="0.25"/>
+        <line x1="0" y1="0" x2="0" y2="8" stroke="#c00000" stroke-width="2" opacity="0.22"/>
       </pattern>
-      <pattern id="turnHatch" patternUnits="userSpaceOnUse" width="8" height="8" patternTransform="rotate(45)">
-        <line x1="0" y1="0" x2="0" y2="8" stroke="#000" stroke-width="2" opacity="0.10"/>
+      <pattern id="turnHatch" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
+        <line x1="0" y1="0" x2="0" y2="10" stroke="#000" stroke-width="2" opacity="0.10"/>
       </pattern>
     </defs>
     """)
     svg.append(f'<rect x="{margin}" y="{margin}" width="{W-2*margin}" height="{H-2*margin}" fill="white" stroke="black" stroke-width="2"/>')
-    svg.append(f'<text x="{margin+8}" y="{margin+28}" font-size="18" font-weight="700">Car: {car_id} — Top View</text>')
-    svg.append(f'<text x="{margin+8}" y="{margin+56}" font-size="13">{note}</text>')
+    svg.append(f'<text x="{margin+10}" y="{margin+30}" font-size="18" font-weight="700">Car: {car_id} — Top View</text>')
+    svg.append(f'<text x="{margin+10}" y="{margin+58}" font-size="13">{note}</text>')
 
-    # doorway hatch
+    # doorway hatch band
     svg.append(f'<rect x="{door_left}" y="{y0}" width="{door_right-door_left}" height="{lane_h}" fill="url(#doorHatch)" stroke="#c00000" stroke-width="3"/>')
     svg.append(f'<text x="{door_left+6}" y="{y0-8}" font-size="12" fill="#c00000">Doorway (Spots {DOOR_START_SPOT}-{DOOR_END_SPOT})</text>')
 
-    # airbag
+    # airbag band
     svg.append(f'<rect x="{band_x}" y="{y0}" width="{band_w}" height="{lane_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
     svg.append(f'<text x="{band_x+4}" y="{y0+lane_h+16}" font-size="12" fill="#d00000">Airbag {airbag_gap_in:.1f}" between {a}-{b}</text>')
 
-    # TURN zone hatch over the two spots
-    turn_zone_x = x0 + (turn_spot - 1) * cell_w
-    svg.append(f'<rect x="{turn_zone_x}" y="{y0}" width="{cell_w*2}" height="{lane_h}" fill="url(#turnHatch)" stroke="#111" stroke-width="2"/>')
-    svg.append(f'<text x="{turn_zone_x + cell_w}" y="{y0+16}" font-size="12" text-anchor="middle">FORKLIFT TURN ({turn_spot}-{blocked})</text>')
+    # turn zone hatch
+    tzx = x0 + (turn_spot - 1) * cell_w
+    svg.append(f'<rect x="{tzx}" y="{y0}" width="{cell_w*2}" height="{lane_h}" fill="url(#turnHatch)" stroke="#111" stroke-width="2"/>')
+    svg.append(f'<text x="{tzx + cell_w}" y="{y0+16}" font-size="12" text-anchor="middle">FORKLIFT TURN ({turn_spot}-{blocked})</text>')
 
-    # draw spots (base)
+    # draw base spot boxes (skip blocked label fill)
     for s in range(1, FLOOR_SPOTS + 1):
         x, y, bw, bh = spot_rect[s]
         col = matrix[s - 1]
@@ -436,7 +436,7 @@ def render_top_svg(
         if s == blocked:
             fill = "#ffffff"
 
-        svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{bh}" fill="{fill}" opacity="0.75" stroke="#333" stroke-width="1"/>')
+        svg.append(f'<rect x="{x}" y="{y}" width="{bw}" height="{bh}" fill="{fill}" opacity="0.35" stroke="#333" stroke-width="1"/>')
         svg.append(f'<text x="{x+6}" y="{y+16}" font-size="12" fill="#333">{s}</text>')
 
         if s in DOORFRAME_NO_ME:
@@ -446,33 +446,36 @@ def render_top_svg(
         if s == blocked:
             svg.append(f'<text x="{x+6}" y="{y+36}" font-size="11" fill="#555">BLOCKED</text>')
 
-    # TURN overlay: draw each tier as two side-by-side horizontal rectangles (one in each spot)
+    # TURN tiers render: ONE wide "horizontal" block per tier spanning both spots
     if tiers > 0 and turn_tiers:
         x1, y1, bw1, bh1 = spot_rect[turn_spot]
         x2, y2, bw2, bh2 = spot_rect[blocked]
         tier_h = bh1 / tiers
 
+        span_x = x1
+        span_w = (x2 + bw2) - x1
+
         for t, pid in turn_tiers:
             y_bar = y1 + bh1 - (t + 1) * tier_h
 
             fill = color_for_pid(pid)
-            # left half (turn_spot)
-            svg.append(f'<rect x="{x1}" y="{y_bar}" width="{bw1}" height="{tier_h}" fill="{fill}" opacity="0.92" stroke="#111" stroke-width="1"/>')
-            # right half (blocked spot)
-            svg.append(f'<rect x="{x2}" y="{y_bar}" width="{bw2}" height="{tier_h}" fill="{fill}" opacity="0.92" stroke="#111" stroke-width="1"/>')
+            svg.append(f'<rect x="{span_x}" y="{y_bar}" width="{span_w}" height="{tier_h}" fill="{fill}" opacity="0.92" stroke="#111" stroke-width="1"/>')
+            # Add "TURN" label to make it obvious this row is rotated
+            svg.append(f'<text x="{span_x + 10}" y="{y_bar + tier_h/2 + 5}" font-size="12" font-weight="700" fill="#111">TURN</text>')
 
             hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
-            svg.append(f'<text x="{x1 + (bw1 + bw2)/2}" y="{y_bar + tier_h/2 + 5}" font-size="12" text-anchor="middle">{pid}{hp}</text>')
+            svg.append(f'<text x="{span_x + span_w/2}" y="{y_bar + tier_h/2 + 5}" font-size="12" text-anchor="middle">{pid}{hp}</text>')
 
-        # outline the full turn span
-        svg.append(f'<rect x="{x1}" y="{y1}" width="{(x2+bw2)-x1}" height="{bh1}" fill="none" stroke="#111" stroke-width="2"/>')
+        svg.append(f'<rect x="{span_x}" y="{y1}" width="{span_w}" height="{bh1}" fill="none" stroke="#111" stroke-width="2"/>')
 
     svg.append("</svg>")
     return "\n".join(svg)
 
 
 # =============================
-# Side view (Load Xpert grid)
+# SIDE VIEW (Load Xpert style)
+# - Draw grid 1..15 and tiers
+# - TURN tiers render as ONE merged wide rectangle across turn_spot and blocked spot
 # =============================
 def render_side_svg(
     *,
@@ -488,12 +491,12 @@ def render_side_svg(
     tiers = len(matrix[0]) if matrix else 0
     blocked = blocked_spot_for_turn(turn_spot)
 
-    W = 1700
-    H = 560
+    W = 1850
+    H = 600
     margin = 24
 
     x0 = margin
-    y0 = margin + 72
+    y0 = margin + 74
     car_w = W - 2 * margin
     car_h = H - y0 - margin - 12
 
@@ -536,35 +539,62 @@ def render_side_svg(
 
     # wheels
     wheel_y = y0 + car_h - 12
-    svg.append(f'<circle cx="{x0+car_w*0.22}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
-    svg.append(f'<circle cx="{x0+car_w*0.28}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
-    svg.append(f'<circle cx="{x0+car_w*0.72}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
-    svg.append(f'<circle cx="{x0+car_w*0.78}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
+    for cx in [x0+car_w*0.22, x0+car_w*0.28, x0+car_w*0.72, x0+car_w*0.78]:
+        svg.append(f'<circle cx="{cx}" cy="{wheel_y}" r="10" fill="#666" opacity="0.5"/>')
 
-    # doorway
+    # doorway + airbag
     svg.append(f'<rect x="{door_left}" y="{load_y}" width="{door_right-door_left}" height="{load_h}" fill="url(#doorHatch2)" stroke="#c00000" stroke-width="3"/>')
     svg.append(f'<rect x="{airbag_x}" y="{load_y}" width="{band_w}" height="{load_h}" fill="none" stroke="#d00000" stroke-width="5"/>')
 
-    # grid + placed tiers
+    # spot vertical grid and bottom numbers
     for spot in range(1, FLOOR_SPOTS + 1):
         x = load_x + (spot - 1) * cell_w
         svg.append(f'<rect x="{x}" y="{load_y}" width="{cell_w}" height="{load_h}" fill="none" stroke="#333" stroke-width="1" opacity="0.55"/>')
         svg.append(f'<text x="{x + cell_w/2}" y="{load_y + load_h + 18}" font-size="12" text-anchor="middle" fill="#333">{spot}</text>')
 
+        if spot in DOORFRAME_NO_ME:
+            svg.append(f'<rect x="{x+2}" y="{load_y+2}" width="{cell_w-4}" height="{load_h-4}" fill="none" stroke="#7a0000" stroke-width="4"/>')
+            svg.append(f'<text x="{x + cell_w/2}" y="{load_y + 16}" font-size="11" text-anchor="middle" fill="#7a0000">NO ME</text>')
+
+    # Draw normal cells, but SKIP blocked spot when it is part of a TURN tier (we'll draw merged wide block instead)
+    for spot in range(1, FLOOR_SPOTS + 1):
         col = matrix[spot - 1]
+        x = load_x + (spot - 1) * cell_w
+
         for t in range(tiers):
             pid = col[t]
             if pid is None or pid == BLOCK:
                 continue
+
+            # If this is the blocked spot, and the TURN spot at same tier has same pid,
+            # skip drawing here (merged block will be drawn from TURN spot).
+            if spot == blocked:
+                pid_turn = matrix[turn_spot - 1][t]
+                if pid_turn == pid:
+                    continue
+
             y = load_y + load_h - (t + 1) * cell_h
             fill = color_for_pid(pid)
             svg.append(f'<rect x="{x+1}" y="{y+1}" width="{cell_w-2}" height="{cell_h-2}" fill="{fill}" stroke="#1a1a1a" stroke-width="1" opacity="0.95"/>')
             hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
             svg.append(f'<text x="{x + cell_w/2}" y="{y + cell_h/2 + 5}" font-size="13" text-anchor="middle" fill="#0a0a0a">{pid}{hp}</text>')
 
-        if spot in DOORFRAME_NO_ME:
-            svg.append(f'<rect x="{x+2}" y="{load_y+2}" width="{cell_w-4}" height="{load_h-4}" fill="none" stroke="#7a0000" stroke-width="4"/>')
-            svg.append(f'<text x="{x + cell_w/2}" y="{load_y + 16}" font-size="11" text-anchor="middle" fill="#7a0000">NO ME</text>')
+    # TURN tiers render: merged wide rectangles across turn_spot + blocked
+    turn_col = matrix[turn_spot - 1]
+    for t in range(tiers):
+        pid = turn_col[t]
+        if pid is None or pid == BLOCK:
+            continue
+
+        x_turn = load_x + (turn_spot - 1) * cell_w
+        y = load_y + load_h - (t + 1) * cell_h
+        span_w = cell_w * 2
+
+        fill = color_for_pid(pid)
+        svg.append(f'<rect x="{x_turn+1}" y="{y+1}" width="{span_w-2}" height="{cell_h-2}" fill="{fill}" stroke="#111" stroke-width="2" opacity="0.98"/>')
+        svg.append(f'<text x="{x_turn + 10}" y="{y + cell_h/2 + 5}" font-size="12" font-weight="700" fill="#111">TURN</text>')
+        hp = " HP" if (pid in products and products[pid].is_half_pack) else ""
+        svg.append(f'<text x="{x_turn + span_w/2}" y="{y + cell_h/2 + 5}" font-size="13" text-anchor="middle" fill="#0a0a0a">{pid}{hp}</text>')
 
     svg.append("</svg>")
     return "\n".join(svg)
@@ -588,7 +618,10 @@ with st.sidebar:
     st.header("Settings")
     car_id = st.text_input("Car ID", value="TBOX632012")
     max_tiers = st.slider("Max tiers per spot", 1, 8, 4)
+
+    # Turn spot MUST be 7 or 8
     turn_spot = int(st.selectbox("Turn spot (must be 7 or 8)", ["7", "8"], index=0))
+
     unit_length_ref_in = st.number_input("Unit length ref (in) for gap drawing", min_value=1.0, value=96.0, step=1.0)
 
     auto_airbag = st.checkbox('Auto airbag (prefer <= 9")', value=True)
@@ -665,7 +698,7 @@ def option_label(r: dict) -> str:
     if pd.notna(width): dims.append(f'{float(width):g}')
     if pd.notna(length): dims.append(f'{float(length):g}')
     if dims:
-        parts.append(" x ".join(dims))  # ASCII "x" only
+        parts.append(" x ".join(dims))  # ASCII x only
     if pd.notna(pcs):
         parts.append(f"{int(pcs)} pcs")
     if pd.notna(wt):
@@ -780,10 +813,10 @@ side_svg = render_side_svg(
 
 st.subheader("Diagram View")
 if view_mode == "Top only":
-    components_svg(top_svg, height=380)
+    components_svg(top_svg, height=390)
 elif view_mode == "Side only":
-    components_svg(side_svg, height=585)
+    components_svg(side_svg, height=620)
 else:
-    components_svg(top_svg, height=380)
+    components_svg(top_svg, height=390)
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
-    components_svg(side_svg, height=585)
+    components_svg(side_svg, height=620)
