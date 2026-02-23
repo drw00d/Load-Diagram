@@ -1,20 +1,4 @@
 # streamlit_app.py
-# Route A (Dynamic 2D Canvas + Dynamic 3D Three.js) — FULL FILE
-#
-# FIXED: No Python f-strings around JS template literals.
-# The HTML is a raw template and we inject only JSON payload via .replace("__PAYLOAD__", payload_json).
-#
-# Requirements:
-#   pip install streamlit pandas openpyxl
-#
-# Files:
-#   data/Ortec SP Product Master.xlsx
-#
-# Notes:
-# - PDF used Base14 Helvetica (not embedded). Browser uses Helvetica/Arial fallback.
-# - Three.js is loaded from a CDN. If your environment blocks CDNs, vendor three.min.js in your repo
-#   and change the script src accordingly.
-
 from __future__ import annotations
 
 import math
@@ -30,12 +14,12 @@ import streamlit.components.v1 as components
 # =============================
 # Page
 # =============================
-st.set_page_config(page_title="Load Diagram Optimizer — Route A", layout="wide")
-st.title("Load Diagram Optimizer — Route A (Canvas 2D + Three.js 3D)")
+st.set_page_config(page_title="Load Diagram Optimizer — LoadXpert Route A", layout="wide")
+st.title("Load Diagram Optimizer — LoadXpert Route A")
+
 
 MASTER_PATH = "data/Ortec SP Product Master.xlsx"
 
-# Product Master columns
 COL_COMMODITY = "Product Type"
 COL_FACILITY = "Facility Id"
 COL_PRODUCT_ID = "Sales Product Id"
@@ -45,7 +29,6 @@ COL_UNIT_H = "Unit Height (In)"
 COL_UNIT_WT = "Unit Weight (lbs)"
 COL_EDGE = "Edge Type"
 
-# Optional
 COL_HALF_PACK = "Half Pack"
 COL_THICK = "Panel Thickness"
 COL_WIDTH = "Width"
@@ -54,36 +37,29 @@ COL_PIECECOUNT = "Piece Count"
 
 BLOCK = "__BLOCK__"
 
-
 # =============================
-# Load Xpert-style constants
+# LoadXpert conventions
 # =============================
 FLOOR_SPOTS_BOXCAR = 15
-FLOOR_SPOTS_CENTERBEAM = 18
-
-# Doorway conventions (boxcar)
 DOOR_START_SPOT = 6
 DOOR_END_SPOT = 9
 
 DOORFRAME_NO_ME = {6, 9}
 DOORPOCKET_PINS = {7, 8}
-
 AIRBAG_ALLOWED_GAPS = [(6, 7), (7, 8), (8, 9)]
 
-# PDF-extracted palette candidates (from raster panels)
-DEFAULT_CODE_COLORS = {
-    "A": {"fill": "#2FB448", "stroke": "#1B5E20"},  # green candidate
-    "B": {"fill": "#FAFD7C", "stroke": "#8A8D00"},  # yellow candidate
-    "C": {"fill": "#76C3C0", "stroke": "#1B6F6A"},  # teal candidate
-    "TURN": {"fill": "#FFFFFF", "stroke": "#111111"},
-}
-
-# Page style
 LX_BLUE = "#0b2a7a"
 LX_RED = "#c00000"
 LX_RED2 = "#d00000"
 LX_GRID = "#000000"
 
+# These are “close to” the PDF colors:
+# teal/aqua for A, green for C, and yellow for B in the example. :contentReference[oaicite:2]{index=2}
+DEFAULT_CODE_COLORS = {
+    "A": {"fill": "#79C7C7", "stroke": "#111111"},
+    "B": {"fill": "#F4F48A", "stroke": "#111111"},
+    "C": {"fill": "#2FB34B", "stroke": "#111111"},
+}
 
 # =============================
 # Models
@@ -116,7 +92,7 @@ class RequestLine:
 
 
 # =============================
-# Data
+# Data helpers
 # =============================
 def _truthy(v) -> bool:
     s = str(v).strip().upper()
@@ -195,7 +171,7 @@ def lookup_product(df: pd.DataFrame, pid: str) -> Product:
 
 
 # =============================
-# Turn rules (boxcar)
+# Turn rules
 # =============================
 def blocked_spot_for_turn(turn_spot: int) -> int:
     return turn_spot + 1
@@ -212,14 +188,13 @@ def occupied_spots_for_placement(spot: int, turn_spot: int) -> List[int]:
 
 
 # =============================
-# Placement matrix
+# Matrix helpers
 # =============================
-def make_empty_matrix(max_tiers: int, turn_spot: int, floor_spots: int) -> List[List[Optional[str]]]:
-    m = [[None for _ in range(max_tiers)] for _ in range(floor_spots)]
+def make_empty_matrix(max_tiers: int, turn_spot: int) -> List[List[Optional[str]]]:
+    m = [[None for _ in range(max_tiers)] for _ in range(FLOOR_SPOTS_BOXCAR)]
     b = blocked_spot_for_turn(turn_spot)
-    if 1 <= b <= floor_spots:
-        for t in range(max_tiers):
-            m[b - 1][t] = BLOCK
+    for t in range(max_tiers):
+        m[b - 1][t] = BLOCK
     return m
 
 
@@ -240,7 +215,7 @@ def place_pid(matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: 
 
 
 # =============================
-# Rules (hard + soft)
+# Placement rules (hard + soft)
 # =============================
 def can_place_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot: int) -> Tuple[bool, str]:
     p = products[pid]
@@ -331,20 +306,18 @@ def optimize_layout(
     max_tiers: int,
     turn_spot: int,
     required_turn_tiers: int,
-    floor_spots: int,
 ) -> Tuple[List[List[Optional[str]]], List[str]]:
     msgs: List[str] = []
     heavy, light = build_token_lists(products, requests)
-    matrix = make_empty_matrix(max_tiers, turn_spot, floor_spots)
+    matrix = make_empty_matrix(max_tiers, turn_spot)
 
-    if floor_spots == FLOOR_SPOTS_BOXCAR:
-        force_turn_tiers(matrix, products, heavy, light, max_tiers, turn_spot, required_turn_tiers, msgs)
+    # Turn usage first
+    force_turn_tiers(matrix, products, heavy, light, max_tiers, turn_spot, required_turn_tiers, msgs)
 
-        outside = [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]
-        doorway = [7, 8, 6, 9]
-        order = [s for s in outside + doorway if not is_blocked_spot(s, turn_spot)]
-    else:
-        order = [s for s in range(1, floor_spots + 1)]
+    # Fill order: outside doorway, then doorway
+    outside = [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]
+    doorway = [7, 8, 6, 9]
+    order = [s for s in outside + doorway if not is_blocked_spot(s, turn_spot)]
 
     def tier_pref(t: int) -> str:
         return "heavy" if t % 2 == 0 else "light"
@@ -365,7 +338,7 @@ def optimize_layout(
             if pid is None:
                 continue
 
-            if floor_spots == FLOOR_SPOTS_BOXCAR and products[pid].is_machine_edge:
+            if products[pid].is_machine_edge:
                 for pin_spot in [7, 8]:
                     if is_blocked_spot(pin_spot, turn_spot):
                         continue
@@ -395,143 +368,131 @@ def optimize_layout(
 
 
 # =============================
-# A/B/C code assignment (stub)
+# A/B/C mapping (placeholder)
 # =============================
 def code_for_pid(pid: str, products: Dict[str, Product]) -> str:
     """
-    Replace this with your real A/B/C mapping if you have it (table, SKU prefix, etc).
-    Current fallback:
-      - Half pack => A
-      - Otherwise => B
+    Replace with your real LoadXpert SKU->A/B/C mapping.
+    For now:
+      - Half pack => B (matches example where HP line is B in the item table)
+      - Else => A
     """
     p = products.get(pid)
     if p and p.is_half_pack:
-        return "A"
-    return "B"
+        return "B"
+    return "A"
 
 
 # =============================
-# Renderer Component (NO f-strings)
+# Render (LoadXpert-style “Top + Side”)
 # =============================
-def render_loadxpert_routeA_component(
+def render_loadxpert_top_side_pdf_style(
     *,
-    page_title: str,
+    view_title: str,
     created_by: str,
     created_at: str,
     order_number: str,
     vehicle_number: str,
     po_number: str,
-    car_id: str,
     matrix: List[List[Optional[str]]],
     products: Dict[str, Product],
-    floor_spots: int,
-    max_tiers: int,
     turn_spot: int,
     airbag_gap_choice: Tuple[int, int],
     airbag_gap_in: float,
+    cg_height_in: float,
+    whole_unit_equiv: float,
+    total_lisa_units: float,
     code_colors: Dict[str, Dict[str, str]],
+    flip_side: bool,
     hatch_angle_deg: float,
     hatch_spacing_px: float,
     hatch_alpha: float,
-    cam_fov: float,
-    cam_x: float,
-    cam_y: float,
-    cam_z: float,
-    light_intensity: float,
-    ambient_intensity: float,
-    show_edges: bool,
-    flip_side: bool,
-    height_px: int = 1020,
+    height_px: int,
 ) -> None:
-    tiers = len(matrix[0]) if matrix else max_tiers
-    tiers = max(1, int(tiers))
+    tiers = len(matrix[0]) if matrix else 4
+    blocked = blocked_spot_for_turn(turn_spot)
 
-    blocked = blocked_spot_for_turn(turn_spot) if floor_spots == FLOOR_SPOTS_BOXCAR else None
+    # Build “spot representative blocks” for TOP view:
+    # Use first non-empty pid in each spot (ignoring BLOCK).
+    rep = {}
+    for s in range(1, FLOOR_SPOTS_BOXCAR + 1):
+        col = matrix[s - 1]
+        pid = next((x for x in col if x and x != BLOCK), None)
+        rep[s] = pid
 
+    # Build SIDE grid tokens
     cells = []
-    for spot in range(1, floor_spots + 1):
+    for s in range(1, FLOOR_SPOTS_BOXCAR + 1):
         for t in range(tiers):
-            pid = matrix[spot - 1][t]
+            pid = matrix[s - 1][t]
             if pid is None or pid == BLOCK:
                 continue
-            # dedupe turn span in blocked spot (avoid double draw)
-            if floor_spots == FLOOR_SPOTS_BOXCAR and blocked == spot:
-                pid_turn = matrix[turn_spot - 1][t]
-                if pid_turn == pid:
-                    continue
-
-            p = products.get(pid)
+            # don't double paint blocked span
+            if s == blocked and matrix[turn_spot - 1][t] == pid:
+                continue
             cells.append(
                 {
-                    "spot": spot,
+                    "spot": s,
                     "tier": t,
                     "pid": pid,
                     "code": code_for_pid(pid, products),
-                    "hp": bool(p.is_half_pack) if p else False,
-                    "unit_h": float(p.unit_height_in) if p else 20.0,
                 }
             )
 
-    data = {
+    # Hatch behavior from PDF:
+    # Doorframe loads (spots 6 and 9) are hatched to indicate securement requirements. :contentReference[oaicite:3]{index=3}
+    hatched_spots = sorted(list(DOORFRAME_NO_ME))
+
+    payload = {
         "meta": {
-            "page_title": page_title,
+            "view_title": view_title,
             "created_by": created_by,
             "created_at": created_at,
             "order_number": order_number,
             "vehicle_number": vehicle_number,
             "po_number": po_number,
-            "car_id": car_id,
-            "floor_spots": floor_spots,
+            "spots": FLOOR_SPOTS_BOXCAR,
             "tiers": tiers,
-            "turn_spot": turn_spot,
-            "blocked_spot": blocked,
-            "airbag_choice": airbag_gap_choice,
-            "airbag_gap_in": airbag_gap_in,
             "door_start": DOOR_START_SPOT,
             "door_end": DOOR_END_SPOT,
-            "is_boxcar": floor_spots == FLOOR_SPOTS_BOXCAR,
+            "turn_spot": turn_spot,
+            "blocked_spot": blocked,
+            "airbag_a": airbag_gap_choice[0],
+            "airbag_b": airbag_gap_choice[1],
+            "airbag_in": airbag_gap_in,
+            "cg_in": cg_height_in,
+            "wue": whole_unit_equiv,
+            "lisa": total_lisa_units,
+            "flip_side": flip_side,
+            "hatched_spots": hatched_spots,
         },
         "colors": code_colors,
-        "hatch": {"angle_deg": hatch_angle_deg, "spacing_px": hatch_spacing_px, "alpha": hatch_alpha},
-        "three": {
-            "cam_fov": cam_fov,
-            "cam_pos": [cam_x, cam_y, cam_z],
-            "light_intensity": light_intensity,
-            "ambient_intensity": ambient_intensity,
-            "show_edges": show_edges,
-        },
-        "flip_side": flip_side,
+        "hatch": {"angle": hatch_angle_deg, "spacing": hatch_spacing_px, "alpha": hatch_alpha},
+        "rep": rep,
         "cells": cells,
     }
-    payload_json = json.dumps(data)
+    payload_json = json.dumps(payload)
 
-    HTML_TEMPLATE = r"""
+    HTML = r"""
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
 <style>
   body { margin:0; padding:0; background:#fff; font-family: Helvetica, Arial, sans-serif; }
-  .wrap { display:flex; flex-direction:row; gap:18px; padding:14px; }
-  canvas { background:#fff; border:1px solid #ddd; }
-  #page { width: 1420px; height: 980px; }
-  #three { width: 520px; height: 980px; }
+  canvas { background:#fff; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <canvas id="page" width="1420" height="980"></canvas>
-  <canvas id="three" width="520" height="980"></canvas>
-</div>
+<canvas id="c" width="1420" height="980"></canvas>
 
 <script>
 const DATA = __PAYLOAD__;
 
-// Style constants
-const LX_GRID = "#000000";
 const LX_BLUE = "#0b2a7a";
 const LX_RED  = "#c00000";
 const LX_RED2 = "#d00000";
+const LX_GRID = "#000000";
 
 function drawHatch(ctx, x, y, w, h, angleDeg, spacing, alpha, color="#000") {
   ctx.save();
@@ -562,33 +523,31 @@ function drawHatch(ctx, x, y, w, h, angleDeg, spacing, alpha, color="#000") {
   ctx.restore();
 }
 
-function fitRotatedText(ctx, text, rectW, rectH, fontFamily, maxPx, minPx, weight="700") {
+function fitRotated(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
   let fs = maxPx;
   while (fs >= minPx) {
-    ctx.font = `${weight} ${fs}px ${fontFamily}`;
-    const tw = ctx.measureText(text).width;
-    if (tw <= rectH * 0.92 && fs <= rectW * 0.92) return fs;
+    ctx.font = `${weight} ${fs}px Helvetica, Arial, sans-serif`;
+    const w = ctx.measureText(text).width;
+    if (w <= maxH * 0.92 && fs <= maxW * 0.92) return fs;
     fs -= 1;
   }
   return minPx;
 }
 
-function fitNormalText(ctx, text, rectW, rectH, fontFamily, maxPx, minPx, weight="400") {
+function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
   let fs = maxPx;
   while (fs >= minPx) {
-    ctx.font = `${weight} ${fs}px ${fontFamily}`;
-    const tw = ctx.measureText(text).width;
-    if (tw <= rectW * 0.92 && fs <= rectH * 0.72) return fs;
+    ctx.font = `${weight} ${fs}px Helvetica, Arial, sans-serif`;
+    const w = ctx.measureText(text).width;
+    if (w <= maxW * 0.92 && fs <= maxH * 0.72) return fs;
     fs -= 1;
   }
   return minPx;
 }
 
-// --------- 2D draw ----------
-(function drawPage() {
-  const canvas = document.getElementById('page');
-  const ctx = canvas.getContext('2d');
-  const M = 18;
+(function draw() {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height;
 
   ctx.clearRect(0,0,W,H);
@@ -596,103 +555,153 @@ function fitNormalText(ctx, text, rectW, rectH, fontFamily, maxPx, minPx, weight
   // Outer border
   ctx.strokeStyle = LX_GRID;
   ctx.lineWidth = 2;
-  ctx.strokeRect(M, M, W-2*M, H-2*M);
+  ctx.strokeRect(10, 10, W-20, H-20);
 
   // Title
   ctx.fillStyle = "#111";
-  ctx.font = "700 20px Helvetica, Arial, sans-serif";
+  ctx.font = "700 22px Helvetica, Arial, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText(DATA.meta.page_title, W/2, M+24);
+  ctx.fillText(DATA.meta.view_title, W/2, 38);
 
-  // Header table (basic)
-  const hx = M+10, hy = M+40;
-  const hw = W-2*M-20, hh = 88;
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = LX_GRID;
-  ctx.strokeRect(hx, hy, hw, hh);
-
-  const colFracs = [0.14,0.22,0.20,0.22,0.22];
-  const colX = [hx];
-  for (let i=0;i<colFracs.length-1;i++) colX.push(colX[colX.length-1] + hw*colFracs[i]);
-  for (let i=1;i<colX.length;i++) { ctx.beginPath(); ctx.moveTo(colX[i], hy); ctx.lineTo(colX[i], hy+hh); ctx.stroke(); }
-  const midY = hy + hh*0.55;
-  ctx.beginPath(); ctx.moveTo(hx, midY); ctx.lineTo(hx+hw, midY); ctx.stroke();
-
-  const headers = ["Created By","Created At","Order Number","Vehicle Number","PO Number"];
-  const vals = [DATA.meta.created_by, DATA.meta.created_at, DATA.meta.order_number, DATA.meta.vehicle_number, DATA.meta.po_number];
-
+  // LoadXpert logo placeholder (top-left)
+  ctx.font = "700 16px Helvetica, Arial, sans-serif";
   ctx.textAlign = "left";
-  for (let i=0;i<5;i++) {
-    const x0 = colX[i];
-    ctx.font = "700 16px Helvetica, Arial, sans-serif";
-    ctx.fillStyle = "#111";
-    ctx.fillText(headers[i], x0+10, hy+24);
-    ctx.font = "400 18px Helvetica, Arial, sans-serif";
-    ctx.fillText(vals[i], x0+10, midY+30);
+  ctx.fillText("LOADXPERT", 36, 58);
+  ctx.font = "400 11px Helvetica, Arial, sans-serif";
+  ctx.fillText("SOFTWARE", 36, 72);
+
+  // Header table
+  const hx=30, hy=80, hw=W-60, hh=84;
+  ctx.strokeStyle = LX_GRID; ctx.lineWidth = 2;
+  ctx.strokeRect(hx,hy,hw,hh);
+  const fr = [0.14,0.22,0.20,0.22,0.22];
+  const xs=[hx];
+  for (let i=0;i<fr.length-1;i++) xs.push(xs[xs.length-1] + hw*fr[i]);
+  for (let i=1;i<xs.length;i++){ ctx.beginPath(); ctx.moveTo(xs[i],hy); ctx.lineTo(xs[i],hy+hh); ctx.stroke(); }
+  const midY = hy + hh*0.55;
+  ctx.beginPath(); ctx.moveTo(hx,midY); ctx.lineTo(hx+hw,midY); ctx.stroke();
+
+  const headers=["Created By","Created At","Order Number","Vehicle Number","PO Number"];
+  const vals=[DATA.meta.created_by, DATA.meta.created_at, DATA.meta.order_number, DATA.meta.vehicle_number, DATA.meta.po_number];
+
+  for (let i=0;i<5;i++){
+    ctx.fillStyle="#111";
+    ctx.textAlign="left";
+    ctx.font="700 14px Helvetica, Arial, sans-serif";
+    ctx.fillText(headers[i], xs[i]+10, hy+24);
+    ctx.font="400 16px Helvetica, Arial, sans-serif";
+    ctx.fillText(vals[i], xs[i]+10, midY+28);
   }
 
-  // Top strip geometry
-  const topX = M+80, topY = hy+hh+28;
-  const topW = W-2*M-160, topH = 140;
+  // Panels (match PDF proportions) :contentReference[oaicite:4]{index=4}
+  const panelTopX = 360;
+  const panelTopY = 195;
+  const panelTopW = W - panelTopX - 40;
+  const panelTopH = 160;
 
-  ctx.textAlign = "center";
-  ctx.font = "700 18px Helvetica, Arial, sans-serif";
-  ctx.fillStyle = "#111";
-  ctx.fillText("Top", W/2, topY-8);
+  const panelSideX = panelTopX;
+  const panelSideY = panelTopY + panelTopH + 55;
+  const panelSideW = panelTopW;
+  const panelSideH = 250;
 
+  // Divider line between top and side zones
+  ctx.strokeStyle = "rgba(0,0,0,0.35)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(30, panelTopY-12);
+  ctx.lineTo(W-30, panelTopY-12);
+  ctx.stroke();
+
+  // ---- TOP label ----
+  ctx.font="700 16px Helvetica, Arial, sans-serif";
+  ctx.fillStyle="#111";
+  ctx.textAlign="center";
+  ctx.fillText("Top", panelTopX + panelTopW/2, panelTopY - 10);
+
+  // Top frame
   ctx.strokeStyle = LX_BLUE;
   ctx.lineWidth = 3;
-  ctx.strokeRect(topX, topY, topW, topH);
+  ctx.strokeRect(panelTopX, panelTopY, panelTopW, panelTopH);
 
-  // Ruler
-  const rulerY = topY - 14;
+  // Ruler (above top frame)
+  const rulerY = panelTopY - 14;
+  ctx.strokeStyle = LX_BLUE;
   ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(topX, rulerY); ctx.lineTo(topX+topW, rulerY); ctx.stroke();
-  const ticks = 70;
-  ctx.lineWidth = 1;
-  for (let i=0;i<=ticks;i++) {
-    const tx = topX + (topW * i / ticks);
-    const hh2 = (i%5===0) ? 10 : 6;
-    ctx.beginPath(); ctx.moveTo(tx, rulerY); ctx.lineTo(tx, rulerY+hh2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(panelTopX, rulerY);
+  ctx.lineTo(panelTopX + panelTopW, rulerY);
+  ctx.stroke();
+
+  // Ticks
+  const ticks=70;
+  ctx.lineWidth=1;
+  for (let i=0;i<=ticks;i++){
+    const tx = panelTopX + (panelTopW*i/ticks);
+    const th = (i%5===0)?10:6;
+    ctx.beginPath();
+    ctx.moveTo(tx, rulerY);
+    ctx.lineTo(tx, rulerY+th);
+    ctx.stroke();
   }
 
-  const spots = DATA.meta.floor_spots;
-  const cellW = topW / spots;
+  // Top blocks with gutters (this is the big difference vs your output)
+  const spots = DATA.meta.spots;
+  const gutterFrac = 0.10;         // white gap between blocks like PDF
+  const cellW = panelTopW / spots;
+  const innerPadY = 12;
+  const blockH = panelTopH - innerPadY*2;
 
-  // representative PID per spot
-  const rep = new Map();
-  for (const c of DATA.cells) { if (!rep.has(c.spot)) rep.set(c.spot, c.pid); }
+  // doorway band bounds
+  const doorLeft = panelTopX + (DATA.meta.door_start-1) * cellW;
+  const doorRight = panelTopX + (DATA.meta.door_end) * cellW;
 
+  // Draw doorway red band (over top blocks)
+  ctx.strokeStyle = LX_RED;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(doorLeft, panelTopY, doorRight-doorLeft, panelTopH);
+
+  // Airbag red band at the boundary between a and b
+  const airX = panelTopX + DATA.meta.airbag_a * cellW;
+  ctx.fillStyle = LX_RED2;
+  ctx.fillRect(airX-3, panelTopY, 6, panelTopH);
+
+  // Spot order (Side1 vs Side2 flip matches PDF pages 3/4) :contentReference[oaicite:5]{index=5}
   const order = [];
   for (let s=1;s<=spots;s++) order.push(s);
-  if (DATA.flip_side) order.reverse();
+  if (DATA.meta.flip_side) order.reverse();
 
-  for (let i=0;i<order.length;i++) {
-    const spot = order[i];
-    const pid = rep.get(spot) || null;
-    const x = topX + i*cellW;
+  // Render blocks
+  for (let i=0;i<order.length;i++){
+    const s = order[i];
+    const pid = DATA.rep[String(s)] || null;
+
+    const x = panelTopX + i*cellW;
+    const gx = x + cellW * gutterFrac * 0.5;
+    const gw = cellW * (1 - gutterFrac);
 
     let fill = "#fff";
-    if (pid) {
-      const first = DATA.cells.find(z => z.spot === spot);
-      const code = (first && first.code) ? first.code : "B";
+    if (pid){
+      // pick code by first matching cell in that spot (approx)
+      const c = DATA.cells.find(z => z.spot === s);
+      const code = (c && c.code) ? c.code : "A";
       fill = (DATA.colors[code] && DATA.colors[code].fill) ? DATA.colors[code].fill : "#fff";
     }
 
     ctx.fillStyle = fill;
-    ctx.fillRect(x, topY, cellW, topH);
+    ctx.fillRect(gx, panelTopY + innerPadY, gw, blockH);
 
-    ctx.strokeStyle = LX_BLUE;
+    // thin inner outline
+    ctx.strokeStyle = "#111";
     ctx.lineWidth = 1;
-    ctx.strokeRect(x, topY, cellW, topH);
+    ctx.strokeRect(gx, panelTopY + innerPadY, gw, blockH);
 
-    if (pid) {
-      const fontFamily = "Helvetica, Arial, sans-serif";
-      const fs = fitRotatedText(ctx, pid, cellW, topH, fontFamily, 26, 10, "700");
+    // label rotated
+    if (pid){
+      const fs = fitRotated(ctx, pid, gw, blockH, 10, 22, "700");
       ctx.save();
-      ctx.translate(x + cellW/2, topY + topH/2);
+      ctx.translate(gx + gw/2, panelTopY + innerPadY + blockH/2);
       ctx.rotate(-Math.PI/2);
-      ctx.font = `700 ${fs}px ${fontFamily}`;
+      ctx.font = `700 ${fs}px Helvetica, Arial, sans-serif`;
       ctx.fillStyle = "#111";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
@@ -701,201 +710,174 @@ function fitNormalText(ctx, text, rectW, rectH, fontFamily, maxPx, minPx, weight
     }
   }
 
-  // Doorway + airbag + turn hatch (boxcar only)
-  if (DATA.meta.is_boxcar) {
-    const doorLeft = topX + (DATA.meta.door_start - 1)*cellW;
-    const doorRight = topX + (DATA.meta.door_end)*cellW;
-
-    ctx.fillStyle = "rgba(255,255,255,0.55)";
-    ctx.fillRect(doorLeft, topY, doorRight-doorLeft, topH);
-
-    ctx.strokeStyle = LX_RED;
-    ctx.lineWidth = 3;
-    ctx.strokeRect(doorLeft, topY, doorRight-doorLeft, topH);
-
-    ctx.font = "400 12px Helvetica, Arial, sans-serif";
-    ctx.fillStyle = LX_RED;
-    ctx.textAlign = "left";
-    ctx.fillText(`Doorway (Spots ${DATA.meta.door_start}-${DATA.meta.door_end})`, doorLeft+6, topY-4);
-
-    const a = DATA.meta.airbag_choice[0];
-    const airX = topX + a*cellW;
-    ctx.fillStyle = LX_RED2;
-    ctx.fillRect(airX-3, topY, 6, topH);
-
-    const tz = topX + (DATA.meta.turn_spot - 1)*cellW;
-    drawHatch(ctx, tz, topY, cellW*2, topH, DATA.hatch.angle_deg, DATA.hatch.spacing_px, DATA.hatch.alpha, "#000");
-    ctx.strokeStyle = "#111";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(tz, topY, cellW*2, topH);
+  // Hatched securement blocks (doorframe spots 6 & 9) — matches PDF behavior :contentReference[oaicite:6]{index=6}
+  for (const hs of DATA.meta.hatched_spots){
+    const idx = order.indexOf(hs);
+    if (idx < 0) continue;
+    const x = panelTopX + idx*cellW;
+    const gx = x + cellW * gutterFrac * 0.5;
+    const gw = cellW * (1 - gutterFrac);
+    drawHatch(ctx, gx, panelTopY + innerPadY, gw, blockH, DATA.hatch.angle, DATA.hatch.spacing, DATA.hatch.alpha, "#000");
   }
 
-  // Side strip
-  const sideX = M+80, sideY = topY+topH+60;
-  const sideW = W-2*M-160, sideH = 260;
+  // ---- SIDE label ----
+  ctx.font="700 16px Helvetica, Arial, sans-serif";
+  ctx.fillStyle="#111";
+  ctx.textAlign="center";
+  ctx.fillText(DATA.meta.flip_side ? "Side2" : "Side1", panelSideX + panelSideW/2, panelSideY - 10);
 
-  ctx.textAlign = "center";
-  ctx.font = "700 18px Helvetica, Arial, sans-serif";
-  ctx.fillStyle = "#111";
-  ctx.fillText(DATA.flip_side ? "Side2" : "Side1", W/2, sideY-10);
-
+  // Side frame
   ctx.strokeStyle = LX_BLUE;
   ctx.lineWidth = 3;
-  ctx.strokeRect(sideX, sideY, sideW, sideH);
+  ctx.strokeRect(panelSideX, panelSideY, panelSideW, panelSideH);
 
-  // wheels
-  const wy = sideY + sideH - 22;
-  const wheelXs = [sideX+sideW*0.15, sideX+sideW*0.22, sideX+sideW*0.78, sideX+sideW*0.85];
-  for (const wx of wheelXs) {
-    ctx.beginPath();
-    ctx.fillStyle = "rgba(102,102,102,0.6)";
-    ctx.arc(wx, wy, 14, 0, Math.PI*2);
-    ctx.fill();
-  }
+  // Side interior
+  const sidePad = 14;
+  const sx = panelSideX + sidePad;
+  const sy = panelSideY + sidePad;
+  const sw = panelSideW - 2*sidePad;
+  const sh = panelSideH - 2*sidePad - 36;  // room for spot numbers + wheels
 
-  const inset = 10;
-  const lx = sideX+inset, ly = sideY+inset;
-  const lw = sideW-2*inset, lh = sideH-2*inset-35;
+  const cw = sw / spots;
+  const ch = sh / DATA.meta.tiers;
 
-  const cw = lw / spots;
-  const tiers = DATA.meta.tiers;
-  const ch = lh / tiers;
+  // Doorway red band + center airbag blank gap
+  const sDoorLeft = sx + (DATA.meta.door_start-1)*cw;
+  const sDoorRight = sx + (DATA.meta.door_end)*cw;
+  ctx.strokeStyle = LX_RED;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(sDoorLeft, sy, sDoorRight - sDoorLeft, sh);
 
-  if (DATA.meta.is_boxcar) {
-    const dl = lx + (DATA.meta.door_start - 1)*cw;
-    const dr = lx + (DATA.meta.door_end)*cw;
-    ctx.fillStyle = "rgba(255,255,255,0.55)";
-    ctx.fillRect(dl, ly, dr-dl, lh);
+  // Airbag blank gap column is the “blocked spot” (turn+1) shown empty in PDF side view
+  // Render that as a white column with red edges
+  const blankSpot = DATA.meta.blocked_spot;
+  const blankIdx = order.indexOf(blankSpot);
+  if (blankIdx >= 0){
+    const bx = sx + blankIdx*cw;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(bx, sy, cw, sh);
     ctx.strokeStyle = LX_RED;
-    ctx.lineWidth = 3;
-    ctx.strokeRect(dl, ly, dr-dl, lh);
-
-    const a2 = DATA.meta.airbag_choice[0];
-    const ax = lx + a2*cw;
-    ctx.fillStyle = LX_RED2;
-    ctx.fillRect(ax-3, ly, 6, lh);
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bx, sy, cw, sh);
   }
 
-  // grid + numbers
-  ctx.strokeStyle = "rgba(51,51,51,0.6)";
+  // Airbag red band at boundary between a and b
+  const sAirX = sx + DATA.meta.airbag_a * cw;
+  ctx.fillStyle = LX_RED2;
+  ctx.fillRect(sAirX-3, sy, 6, sh);
+
+  // Grid + blocks
+  ctx.strokeStyle = "#111";
   ctx.lineWidth = 1;
-  ctx.fillStyle = "#333";
-  ctx.font = "400 12px Helvetica, Arial, sans-serif";
-  ctx.textAlign = "center";
-  for (let i=0;i<order.length;i++) {
+
+  // draw cells (skip blankSpot)
+  for (let i=0;i<order.length;i++){
     const spot = order[i];
-    const x = lx + i*cw;
-    ctx.strokeRect(x, ly, cw, lh);
-    ctx.fillText(String(spot), x+cw/2, ly+lh+24);
-  }
+    const x = sx + i*cw;
 
-  // blocks
-  for (const c of DATA.cells) {
-    const idx = order.indexOf(c.spot);
-    if (idx < 0) continue;
-    const x = lx + idx*cw;
-    const y = ly + lh - (c.tier+1)*ch;
+    // outline columns
+    ctx.strokeStyle = "rgba(17,17,17,0.55)";
+    ctx.strokeRect(x, sy, cw, sh);
 
-    const fill = (DATA.colors[c.code] && DATA.colors[c.code].fill) ? DATA.colors[c.code].fill : "#fff";
-    ctx.fillStyle = fill;
-    ctx.strokeStyle = "#111";
-    ctx.lineWidth = 1;
-    ctx.fillRect(x+1, y+1, cw-2, ch-2);
-    ctx.strokeRect(x+1, y+1, cw-2, ch-2);
+    if (spot === blankSpot) continue;
 
-    const fontFamily = "Helvetica, Arial, sans-serif";
-    const fs = fitNormalText(ctx, c.pid, cw-6, ch-6, fontFamily, 14, 8, "400");
-    ctx.font = `400 ${fs}px ${fontFamily}`;
-    ctx.fillStyle = "#111";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(c.pid, x+cw/2, y+ch/2);
-  }
-})();
-</script>
+    for (let t=0;t<DATA.meta.tiers;t++){
+      const y = sy + sh - (t+1)*ch;
 
-<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script>
-(function drawThree() {
-  const canvas = document.getElementById('three');
-  const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
-  renderer.setSize(canvas.width, canvas.height, false);
+      // find matching cell in payload
+      const cell = DATA.cells.find(z => z.spot === spot && z.tier === t);
+      if (!cell) continue;
 
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xffffff);
+      const fill = (DATA.colors[cell.code] && DATA.colors[cell.code].fill) ? DATA.colors[cell.code].fill : "#fff";
 
-  const camera = new THREE.PerspectiveCamera(DATA.three.cam_fov, canvas.width/canvas.height, 0.1, 1000);
-  camera.position.set(DATA.three.cam_pos[0], DATA.three.cam_pos[1], DATA.three.cam_pos[2]);
-  camera.lookAt(0, 0, 0);
+      ctx.fillStyle = fill;
+      ctx.fillRect(x+1, y+1, cw-2, ch-2);
+      ctx.strokeStyle = "#111";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x+1, y+1, cw-2, ch-2);
 
-  scene.add(new THREE.AmbientLight(0xffffff, DATA.three.ambient_intensity));
-
-  const dir = new THREE.DirectionalLight(0xffffff, DATA.three.light_intensity);
-  dir.position.set(8, 12, 10);
-  scene.add(dir);
-
-  const grid = new THREE.GridHelper(20, 20, 0xcccccc, 0xeeeeee);
-  grid.position.y = -0.01;
-  scene.add(grid);
-
-  const spots = DATA.meta.floor_spots;
-  const tiers = DATA.meta.tiers;
-
-  const spotW = 0.9;
-  const spotD = DATA.meta.is_boxcar ? 1.1 : 0.9;
-  const tierH = 0.22;
-
-  const x0 = -(spots * spotW) / 2 + spotW/2;
-
-  const mats = new Map();
-  function matForCode(code) {
-    if (mats.has(code)) return mats.get(code);
-    const fill = (DATA.colors[code] && DATA.colors[code].fill) ? DATA.colors[code].fill : "#ffffff";
-    const m = new THREE.MeshLambertMaterial({ color: new THREE.Color(fill) });
-    mats.set(code, m);
-    return m;
-  }
-
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0x111111 });
-  const group = new THREE.Group();
-  scene.add(group);
-
-  for (const c of DATA.cells) {
-    const spotIndex = (DATA.flip_side) ? (spots - c.spot) : (c.spot - 1);
-    const x = x0 + spotIndex * spotW;
-    const y = (c.tier + 0.5) * tierH;
-    const z = 0;
-
-    const geo = new THREE.BoxGeometry(spotW*0.96, tierH*0.92, spotD*0.92);
-    const mesh = new THREE.Mesh(geo, matForCode(c.code));
-    mesh.position.set(x, y, z);
-    group.add(mesh);
-
-    if (DATA.three.show_edges) {
-      const edges = new THREE.EdgesGeometry(geo);
-      const line = new THREE.LineSegments(edges, edgeMat);
-      line.position.copy(mesh.position);
-      group.add(line);
+      // label
+      const fs = fitNormal(ctx, cell.pid, cw-6, ch-6, 8, 14, "700");
+      ctx.font = `700 ${fs}px Helvetica, Arial, sans-serif`;
+      ctx.fillStyle = "#111";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(cell.pid, x+cw/2, y+ch/2);
     }
   }
 
-  const frameGeo = new THREE.BoxGeometry(spots*spotW*1.02, tiers*tierH*1.02 + 0.1, spotD*1.05);
-  const frameEdges = new THREE.EdgesGeometry(frameGeo);
-  const frame = new THREE.LineSegments(frameEdges, new THREE.LineBasicMaterial({ color: 0x0b2a7a }));
-  frame.position.set(0, (tiers*tierH)/2, 0);
-  group.add(frame);
-
-  function render() {
-    renderer.render(scene, camera);
-    requestAnimationFrame(render);
+  // Hatched securement overlay on side for doorframe spots (6 & 9)
+  for (const hs of DATA.meta.hatched_spots){
+    const idx = order.indexOf(hs);
+    if (idx < 0) continue;
+    const x = sx + idx*cw;
+    drawHatch(ctx, x+1, sy+1, cw-2, sh-2, DATA.hatch.angle, DATA.hatch.spacing, DATA.hatch.alpha, "#000");
   }
-  render();
+
+  // Wheels (like PDF)
+  const wheelY = panelSideY + panelSideH - 26;
+  const wxs = [panelSideX + panelSideW*0.20, panelSideX + panelSideW*0.27, panelSideX + panelSideW*0.73, panelSideX + panelSideW*0.80];
+  ctx.fillStyle = "rgba(80,80,80,0.85)";
+  for (const wx of wxs){
+    ctx.beginPath();
+    ctx.arc(wx, wheelY, 14, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Spot numbers under side (PDF shows 1..15 or reversed) :contentReference[oaicite:7]{index=7}
+  ctx.fillStyle = "#111";
+  ctx.font = "400 12px Helvetica, Arial, sans-serif";
+  ctx.textAlign = "center";
+  for (let i=0;i<order.length;i++){
+    const x = sx + i*cw;
+    ctx.fillText(String(order[i]), x+cw/2, sy+sh+22);
+  }
+
+  // Footer metrics row (matches PDF row) :contentReference[oaicite:8]{index=8}
+  const fx = 30, fy = panelSideY + panelSideH + 20;
+  const fw = W-60, fh = 70;
+  ctx.strokeStyle = LX_GRID;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(fx, fy, fw, fh);
+
+  // 4 columns
+  const fcols = [0.25,0.25,0.25,0.25];
+  const fxs=[fx];
+  for (let i=0;i<fcols.length-1;i++) fxs.push(fxs[fxs.length-1] + fw*fcols[i]);
+  for (let i=1;i<fxs.length;i++){ ctx.beginPath(); ctx.moveTo(fxs[i],fy); ctx.lineTo(fxs[i],fy+fh); ctx.stroke(); }
+
+  ctx.font = "700 12px Helvetica, Arial, sans-serif";
+  ctx.fillStyle="#111";
+  ctx.textAlign="left";
+
+  ctx.fillText(`Floor spots = ${DATA.meta.spots}`, fxs[0]+10, fy+24);
+  ctx.fillText(`C.G. height = ${DATA.meta.cg_in.toFixed(2)} (in)`, fxs[1]+10, fy+24);
+  ctx.fillText(`Airbag Space = ${DATA.meta.airbag_in.toFixed(2)} (in)`, fxs[2]+10, fy+24);
+  ctx.fillText(`Whole Unit Equivalent = ${DATA.meta.wue.toFixed(1)}`, fxs[3]+10, fy+24);
+
+  ctx.fillText(`Total LISA Units = ${DATA.meta.lisa.toFixed(1)}`, fxs[3]+10, fy+48);
+
+  // Hatch legend text like PDF (bottom) :contentReference[oaicite:9]{index=9}
+  const ly = fy + fh + 20;
+  ctx.font = "700 12px Helvetica, Arial, sans-serif";
+  ctx.fillText("Secure Loads from:", 40, ly);
+
+  // diagonal hatch swatch
+  drawHatch(ctx, 170, ly-14, 34, 18, 45, 6, 0.35, "#000");
+  ctx.strokeStyle="#111"; ctx.strokeRect(170, ly-14, 34, 18);
+  ctx.font="400 12px Helvetica, Arial, sans-serif";
+  ctx.fillText("sliding", 210, ly);
+
+  // vertical hatch swatch
+  drawHatch(ctx, 300, ly-14, 34, 18, 90, 6, 0.35, "#000");
+  ctx.strokeStyle="#111"; ctx.strokeRect(300, ly-14, 34, 18);
+  ctx.fillText("tipping & sliding", 340, ly);
 })();
 </script>
 </body>
 </html>
 """
-    html = HTML_TEMPLATE.replace("__PAYLOAD__", payload_json)
+    html = HTML.replace("__PAYLOAD__", payload_json)
     components.html(html, height=height_px, scrolling=True)
 
 
@@ -909,91 +891,82 @@ except Exception as e:
     st.stop()
 
 if "requests" not in st.session_state:
-    st.session_state.requests = []
+    st.session_state.requests: List[RequestLine] = []
 if "matrix" not in st.session_state:
-    st.session_state.matrix = make_empty_matrix(4, 7, FLOOR_SPOTS_BOXCAR)
+    st.session_state.matrix = make_empty_matrix(4, 7)
 
-# Sidebar
 with st.sidebar:
-    st.header("Route A Controls")
+    st.header("Settings (PDF-matching layout)")
 
-    car_type = st.selectbox("Car Type", ["Boxcar (15)", "Centerbeam (18)"], index=0)
-    is_boxcar = car_type.startswith("Boxcar")
-    floor_spots = FLOOR_SPOTS_BOXCAR if is_boxcar else FLOOR_SPOTS_CENTERBEAM
-
-    st.divider()
-    car_id = st.text_input("Vehicle Number / Car ID", value="TBOX632012")
-    order_number = st.text_input("Order Number", value="—")
-    po_number = st.text_input("PO Number", value="—")
-    created_by = st.text_input("Created By", value="—")
-    created_at = st.text_input("Created At", value="—")
-    vehicle_number = st.text_input("Vehicle Number (label)", value="—")
+    view_title = st.text_input("View Title", value="Top + Side View (Route A)")
+    created_by = st.text_input("Created By", value="307")
+    created_at = st.text_input("Created At", value="Feb 11, 2026")
+    order_number = st.text_input("Order Number", value="307305097")
+    vehicle_number = st.text_input("Vehicle Number", value="UML_TBOX-0000644577")
+    po_number = st.text_input("PO Number", value="WC2096056")
 
     st.divider()
-    max_tiers = st.slider("Max tiers per spot", 1, 10, 4)
 
-    if is_boxcar:
-        turn_spot = int(st.selectbox("Turn spot (must be 7 or 8)", ["7", "8"], index=0))
-        required_turn_tiers = st.slider("Turn tiers required (HARD)", 0, int(max_tiers), int(max_tiers))
-        required_turn_tiers = min(int(required_turn_tiers), int(max_tiers))
+    max_tiers = st.slider("Max tiers per spot", 1, 8, 4)
+    turn_spot = int(st.selectbox("Turn spot (must be 7 or 8)", ["7", "8"], index=0))
+    required_turn_tiers = st.slider("Turn tiers required (HARD)", 0, 8, int(max_tiers))
+    required_turn_tiers = min(int(required_turn_tiers), int(max_tiers))
 
-        auto_airbag = st.checkbox('Auto airbag (prefer <= 9")', value=True)
-        if auto_airbag:
-            airbag_gap_choice, airbag_gap_in = (7, 8), 6.0
-        else:
-            gap_labels = [f"{a}-{b}" for a, b in AIRBAG_ALLOWED_GAPS]
-            gap_choice_label = st.selectbox("Airbag location", gap_labels, index=1)
-            airbag_gap_choice = AIRBAG_ALLOWED_GAPS[gap_labels.index(gap_choice_label)]
-            airbag_gap_in = st.slider("Airbag gap (in)", 6.0, 10.0, 6.0, 0.5)
+    st.divider()
+
+    auto_airbag = st.checkbox('Auto airbag (prefer <= 9")', value=False)
+    if auto_airbag:
+        airbag_gap_choice, airbag_gap_in = (7, 8), 9.0
     else:
-        turn_spot = 7
-        required_turn_tiers = 0
-        airbag_gap_choice = (7, 8)
-        airbag_gap_in = 0.0
+        gap_labels = [f"{a}-{b}" for a, b in AIRBAG_ALLOWED_GAPS]
+        gap_choice_label = st.selectbox("Airbag location", gap_labels, index=1)
+        airbag_gap_choice = AIRBAG_ALLOWED_GAPS[gap_labels.index(gap_choice_label)]
+        airbag_gap_in = st.slider("Airbag space (in)", 6.0, 12.0, 9.0, 0.5)
 
     st.divider()
-    st.subheader("A/B/C Colors")
+
+    st.subheader("Footer metrics (PDF row)")
+    cg_height_in = st.number_input("C.G. height (in)", min_value=0.0, value=97.24, step=0.01)
+    whole_unit_equiv = st.number_input("Whole Unit Equivalent", min_value=0.0, value=58.5, step=0.1)
+    total_lisa_units = st.number_input("Total LISA Units", min_value=0.0, value=60.0, step=0.1)
+
+    st.divider()
+
+    st.subheader("A/B/C Colors (close to PDF)")
     colA = st.color_picker("A Fill", DEFAULT_CODE_COLORS["A"]["fill"])
     colB = st.color_picker("B Fill", DEFAULT_CODE_COLORS["B"]["fill"])
     colC = st.color_picker("C Fill", DEFAULT_CODE_COLORS["C"]["fill"])
     code_colors = {
-        "A": {"fill": colA, "stroke": DEFAULT_CODE_COLORS["A"]["stroke"]},
-        "B": {"fill": colB, "stroke": DEFAULT_CODE_COLORS["B"]["stroke"]},
-        "C": {"fill": colC, "stroke": DEFAULT_CODE_COLORS["C"]["stroke"]},
-        "TURN": DEFAULT_CODE_COLORS["TURN"],
+        "A": {"fill": colA, "stroke": "#111111"},
+        "B": {"fill": colB, "stroke": "#111111"},
+        "C": {"fill": colC, "stroke": "#111111"},
     }
 
     st.divider()
-    st.subheader("Hatch Calibration")
+
+    st.subheader("Hatch calibration")
     hatch_angle_deg = st.slider("Hatch angle (deg)", 0.0, 90.0, 45.0, 1.0)
-    hatch_spacing_px = st.slider("Hatch spacing (px)", 4.0, 20.0, 10.0, 1.0)
-    hatch_alpha = st.slider("Hatch opacity", 0.05, 0.6, 0.18, 0.01)
+    hatch_spacing_px = st.slider("Hatch spacing (px)", 4.0, 20.0, 8.0, 1.0)
+    hatch_alpha = st.slider("Hatch opacity", 0.05, 0.6, 0.22, 0.01)
 
     st.divider()
-    st.subheader("3D Calibration")
-    cam_fov = st.slider("Camera FOV", 20.0, 75.0, 42.0, 1.0)
-    cam_x = st.slider("Camera X", -30.0, 30.0, 10.0, 0.5)
-    cam_y = st.slider("Camera Y", 0.0, 30.0, 10.0, 0.5)
-    cam_z = st.slider("Camera Z", -40.0, 40.0, 18.0, 0.5)
-    light_intensity = st.slider("Directional light", 0.2, 3.0, 1.2, 0.1)
-    ambient_intensity = st.slider("Ambient light", 0.0, 2.0, 0.65, 0.05)
-    show_edges = st.checkbox("3D edges/outline", value=True)
+
+    flip_side = st.checkbox("Side2 (flip like PDF page 4)", value=True)
 
     st.divider()
-    flip_side = st.checkbox("Render Side2 (flip)", value=False)
 
-    st.divider()
     optimize_btn = st.button("Optimize Layout")
-    render_btn = st.button("Generate Diagram", type="primary")
+    render_btn = st.button("Render PDF-style", type="primary")
     clear_btn = st.button("Clear All")
+
 
 if clear_btn:
     st.session_state.requests = []
-    st.session_state.matrix = make_empty_matrix(int(max_tiers), int(turn_spot), int(floor_spots))
+    st.session_state.matrix = make_empty_matrix(int(max_tiers), int(turn_spot))
+
 
 st.success(f"Product Master loaded: {len(pm):,} rows")
 
-# Filters
 commodities = sorted(pm[COL_COMMODITY].dropna().astype(str).unique().tolist())
 commodity_selected = st.selectbox("Commodity / Product Type (required)", ["(Select)"] + commodities)
 if commodity_selected == "(Select)":
@@ -1001,6 +974,7 @@ if commodity_selected == "(Select)":
     st.stop()
 
 pm_c = pm[pm[COL_COMMODITY].astype(str) == str(commodity_selected)].copy()
+
 facilities = sorted(pm_c[COL_FACILITY].dropna().astype(str).unique().tolist()) if COL_FACILITY in pm_c.columns else []
 facility_selected = st.selectbox("Facility Id (filtered by commodity)", ["(All facilities)"] + facilities)
 
@@ -1023,29 +997,21 @@ options = pm_cf.to_dict("records")
 def option_label(r: dict) -> str:
     pid = str(r.get(COL_PRODUCT_ID, "")).strip()
     desc = str(r.get(COL_DESC, "")).strip()
-    wt = r.get(COL_UNIT_WT)
     if COL_HALF_PACK in pm_cf.columns:
         hp = " HP" if _truthy(r.get(COL_HALF_PACK, "")) else ""
     else:
         hp = " HP" if desc.upper().rstrip().endswith("HP") else ""
-    parts = [f"{pid}{hp}"]
-    if pd.notna(wt):
-        parts.append(f"{float(wt):,.0f} lbs")
-    if desc:
-        parts.append(desc)
-    return " | ".join(parts)
+    return f"{pid}{hp} | {desc}" if desc else f"{pid}{hp}"
 
 
 labels = [option_label(r) for r in options]
 selected_label = st.selectbox("Pick a Product", labels) if labels else None
 
-c1, c2, c3 = st.columns([2, 1, 1], vertical_alignment="bottom")
+c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
 with c1:
     tiers_to_add = st.number_input("Tiers to add", min_value=1, value=4, step=1)
 with c2:
     add_line = st.button("Add Line", disabled=(selected_label is None))
-with c3:
-    st.write("")
 
 if add_line and selected_label:
     idx = labels.index(selected_label)
@@ -1053,6 +1019,7 @@ if add_line and selected_label:
     st.session_state.requests.append(RequestLine(product_id=pid, tiers=int(tiers_to_add)))
 
 st.subheader("Requested SKUs (tiers)")
+
 products: Dict[str, Product] = {}
 for r in st.session_state.requests:
     try:
@@ -1067,21 +1034,14 @@ if st.session_state.requests:
         rows.append({"Sales Product Id": r.product_id, "Description": p.description if p else "", "Tiers": r.tiers})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, height=220)
 else:
-    st.info("Add one or more SKUs, then Optimize Layout, then Generate Diagram.")
+    st.info("Add one or more SKUs, then Optimize Layout, then Render.")
 
 msgs: List[str] = []
 if optimize_btn:
     if not st.session_state.requests:
         st.warning("No request lines to optimize.")
     else:
-        matrix, msgs = optimize_layout(
-            products,
-            st.session_state.requests,
-            int(max_tiers),
-            int(turn_spot),
-            int(required_turn_tiers),
-            int(floor_spots),
-        )
+        matrix, msgs = optimize_layout(products, st.session_state.requests, int(max_tiers), int(turn_spot), int(required_turn_tiers))
         st.session_state.matrix = matrix
 
 for m in msgs:
@@ -1091,37 +1051,27 @@ if render_btn:
     if not st.session_state.requests:
         st.warning("No request lines to render.")
     else:
-        if not st.session_state.matrix or len(st.session_state.matrix) != int(floor_spots):
-            st.session_state.matrix = make_empty_matrix(int(max_tiers), int(turn_spot), int(floor_spots))
-
-        render_loadxpert_routeA_component(
-            page_title="Top + Side View (Route A)",
-            created_by=str(created_by if created_by != "—" else facility_selected),
-            created_at=str(created_at),
-            order_number=str(order_number),
-            vehicle_number=str(vehicle_number),
-            po_number=str(po_number),
-            car_id=str(car_id),
+        render_loadxpert_top_side_pdf_style(
+            view_title=view_title,
+            created_by=created_by,
+            created_at=created_at,
+            order_number=order_number,
+            vehicle_number=vehicle_number,
+            po_number=po_number,
             matrix=st.session_state.matrix,
             products=products,
-            floor_spots=int(floor_spots),
-            max_tiers=int(max_tiers),
             turn_spot=int(turn_spot),
             airbag_gap_choice=airbag_gap_choice,
             airbag_gap_in=float(airbag_gap_in),
+            cg_height_in=float(cg_height_in),
+            whole_unit_equiv=float(whole_unit_equiv),
+            total_lisa_units=float(total_lisa_units),
             code_colors=code_colors,
+            flip_side=bool(flip_side),
             hatch_angle_deg=float(hatch_angle_deg),
             hatch_spacing_px=float(hatch_spacing_px),
             hatch_alpha=float(hatch_alpha),
-            cam_fov=float(cam_fov),
-            cam_x=float(cam_x),
-            cam_y=float(cam_y),
-            cam_z=float(cam_z),
-            light_intensity=float(light_intensity),
-            ambient_intensity=float(ambient_intensity),
-            show_edges=bool(show_edges),
-            flip_side=bool(flip_side),
-            height_px=1040,
+            height_px=1000,
         )
 else:
-    st.caption("Click **Generate Diagram** to render the Canvas 2D page + Three.js 3D panel.")
+    st.caption("Click **Render PDF-style** to draw the LoadXpert-like Top + Side page.")
