@@ -1,12 +1,26 @@
 # streamlit_app.py
-# Load Diagram Optimizer — Load Xpert-style PDF layout + CG_above_TOR integration (UI Spec v1.1)
-# Copy/paste into GitHub as-is.
+# Route A: Dynamic 2D (canvas for exact font metrics/rotation fit) + Dynamic 3D (Three.js)
+# - Uses PDF-derived defaults: Helvetica stack + palette candidates from raster extraction
+# - Implements rotated text "fit-to-rect" sizing on canvas (browser-accurate metrics)
+# - Implements doorway blank bands + hatch overlays (geometry matches Load Xpert page layout)
+# - Implements a 3D panel with calibrated camera/lights (tunable via sliders)
+#
+# Repo notes:
+#   pip install streamlit pandas openpyxl
+#   Put Product Master at: data/Ortec SP Product Master.xlsx
+#
+# IMPORTANT:
+# - PDFs often use Base14 Helvetica (not embedded). Browser uses Helvetica/Arial fallback.
+# - True pixel identity still depends on the viewer's font availability.
+# - Three.js is loaded from a CDN (unpkg). If your environment blocks CDNs,
+#   vendor three.min.js into your repo and replace the script src.
 
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, Iterable
+from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
@@ -16,13 +30,13 @@ import streamlit.components.v1 as components
 # =============================
 # Page
 # =============================
-st.set_page_config(page_title="Load Diagram Optimizer", layout="wide")
-st.title("Load Diagram Optimizer")
+st.set_page_config(page_title="Load Diagram Optimizer — Route A", layout="wide")
+st.title("Load Diagram Optimizer — Route A (Canvas 2D + Three.js 3D)")
 
-# Update if your repo stores the master elsewhere
+
 MASTER_PATH = "data/Ortec SP Product Master.xlsx"
 
-# Product Master columns (must match your Excel)
+# Product Master columns
 COL_COMMODITY = "Product Type"
 COL_FACILITY = "Facility Id"
 COL_PRODUCT_ID = "Sales Product Id"
@@ -39,7 +53,7 @@ COL_WIDTH = "Width"
 COL_LENGTH = "Length"
 COL_PIECECOUNT = "Piece Count"
 
-BLOCK = "__BLOCK__"  # internal marker
+BLOCK = "__BLOCK__"
 
 
 # =============================
@@ -52,23 +66,25 @@ FLOOR_SPOTS_CENTERBEAM = 18
 DOOR_START_SPOT = 6
 DOOR_END_SPOT = 9
 
-DOORFRAME_NO_ME = {6, 9}     # Machine Edge not allowed here
-DOORPOCKET_PINS = {7, 8}     # Machine Edge allowed/preferred here
+DOORFRAME_NO_ME = {6, 9}
+DOORPOCKET_PINS = {7, 8}
 
 AIRBAG_ALLOWED_GAPS = [(6, 7), (7, 8), (8, 9)]
 
-# CG_above_TOR thresholds (configurable)
-CG_THRESHOLDS_IN = {
-    "boxcar": {"preferred_lt": 105.0, "caution_le": 115.0},
-    "centerbeam": {"preferred_lt": 105.0, "caution_le": 115.0},
+# PDF-extracted dominant palette candidates (from raster panels)
+# You can set actual A/B/C mapping here (or via sidebar).
+DEFAULT_CODE_COLORS = {
+    "A": {"fill": "#2FB448", "stroke": "#1B5E20"},  # green candidate
+    "B": {"fill": "#FAFD7C", "stroke": "#8A8D00"},  # yellow candidate
+    "C": {"fill": "#76C3C0", "stroke": "#1B6F6A"},  # teal candidate
+    "TURN": {"fill": "#FFFFFF", "stroke": "#111111"},
 }
 
-# Load Xpert-like colors
+# Page style
 LX_BLUE = "#0b2a7a"
 LX_RED = "#c00000"
 LX_RED2 = "#d00000"
 LX_GRID = "#000000"
-LX_TEXT = "#111111"
 
 
 # =============================
@@ -205,7 +221,7 @@ def make_empty_matrix(max_tiers: int, turn_spot: int, floor_spots: int) -> List[
     b = blocked_spot_for_turn(turn_spot)
     if 1 <= b <= floor_spots:
         for t in range(max_tiers):
-            m[b - 1][t] = BLOCK  # visually blocked
+            m[b - 1][t] = BLOCK
     return m
 
 
@@ -231,10 +247,8 @@ def place_pid(matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: 
 def can_place_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot: int) -> Tuple[bool, str]:
     p = products[pid]
     occ = occupied_spots_for_placement(spot, turn_spot)
-
     if p.is_machine_edge and any(s in DOORFRAME_NO_ME for s in occ):
         return False, "Machine Edge not allowed in doorframe spots 6/9 (or any placement that touches them)."
-
     return True, ""
 
 
@@ -267,14 +281,7 @@ def build_token_lists(products: Dict[str, Product], requests: List[RequestLine])
     return heavy, light
 
 
-def pop_best(
-    tokens: List[str],
-    products: Dict[str, Product],
-    spot: int,
-    tier_idx: int,
-    max_tiers: int,
-    turn_spot: int,
-) -> Optional[str]:
+def pop_best(tokens: List[str], products: Dict[str, Product], spot: int, tier_idx: int, max_tiers: int, turn_spot: int) -> Optional[str]:
     best_i = None
     best_score = None
     for i, pid in enumerate(tokens):
@@ -308,15 +315,10 @@ def force_turn_tiers(
             continue
 
         pref = "heavy" if (t % 2 == 0) else "light"
-        pid = None
         if pref == "heavy":
-            pid = pop_best(heavy, products, turn_spot, t, max_tiers, turn_spot) or pop_best(
-                light, products, turn_spot, t, max_tiers, turn_spot
-            )
+            pid = pop_best(heavy, products, turn_spot, t, max_tiers, turn_spot) or pop_best(light, products, turn_spot, t, max_tiers, turn_spot)
         else:
-            pid = pop_best(light, products, turn_spot, t, max_tiers, turn_spot) or pop_best(
-                heavy, products, turn_spot, t, max_tiers, turn_spot
-            )
+            pid = pop_best(light, products, turn_spot, t, max_tiers, turn_spot) or pop_best(heavy, products, turn_spot, t, max_tiers, turn_spot)
 
         if pid is None:
             msgs.append(f"TURN HARD RULE: could not place a legal tier into TURN spot at Tier {t+1}.")
@@ -337,44 +339,34 @@ def optimize_layout(
     heavy, light = build_token_lists(products, requests)
     matrix = make_empty_matrix(max_tiers, turn_spot, floor_spots)
 
-    # Turn rules apply only on 15-spot boxcar logic
     if floor_spots == FLOOR_SPOTS_BOXCAR:
         force_turn_tiers(matrix, products, heavy, light, max_tiers, turn_spot, required_turn_tiers, msgs)
 
-    # Fill order
-    if floor_spots == FLOOR_SPOTS_BOXCAR:
         outside = [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]
         doorway = [7, 8, 6, 9]
         order = [s for s in outside + doorway if not is_blocked_spot(s, turn_spot)]
     else:
-        order = [s for s in range(1, floor_spots + 1) if not is_blocked_spot(s, turn_spot)]
+        order = [s for s in range(1, floor_spots + 1)]
 
     def tier_pref(t: int) -> str:
         return "heavy" if t % 2 == 0 else "light"
 
     while heavy or light:
         placed_any = False
-
         for spot in order:
             t = next_empty_tier_index(matrix, spot, turn_spot)
             if t is None:
                 continue
 
             pref = tier_pref(t)
-            pid = None
             if pref == "heavy":
-                pid = pop_best(heavy, products, spot, t, max_tiers, turn_spot) or pop_best(
-                    light, products, spot, t, max_tiers, turn_spot
-                )
+                pid = pop_best(heavy, products, spot, t, max_tiers, turn_spot) or pop_best(light, products, spot, t, max_tiers, turn_spot)
             else:
-                pid = pop_best(light, products, spot, t, max_tiers, turn_spot) or pop_best(
-                    heavy, products, spot, t, max_tiers, turn_spot
-                )
+                pid = pop_best(light, products, spot, t, max_tiers, turn_spot) or pop_best(heavy, products, spot, t, max_tiers, turn_spot)
 
             if pid is None:
                 continue
 
-            # Pin preference for machine-edge in 7/8 (boxcar only)
             if floor_spots == FLOOR_SPOTS_BOXCAR and products[pid].is_machine_edge:
                 for pin_spot in [7, 8]:
                     if is_blocked_spot(pin_spot, turn_spot):
@@ -405,197 +397,29 @@ def optimize_layout(
 
 
 # =============================
-# Rendering helpers
+# A/B/C code assignment (deterministic)
 # =============================
-def svg_escape(s: str) -> str:
-    return (
-        str(s)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&#39;")
-    )
-
-
-def color_for_pid(pid: str) -> str:
-    palette = ["#d9ecff", "#ffe3d9", "#e6ffd9", "#f2e6ff", "#fff5cc", "#d9fff7", "#ffd9f1", "#e0e0ff"]
-    h = 0
-    for ch in pid:
-        h = (h * 31 + ord(ch)) % 10_000
-    return palette[h % len(palette)]
-
-
-def hatch_pattern_defs() -> str:
-    return """
-    <defs>
-      <pattern id="hx_diag" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
-        <line x1="0" y1="0" x2="0" y2="10" stroke="#000" stroke-width="2" opacity="0.18"/>
-      </pattern>
-      <pattern id="hx_vert" patternUnits="userSpaceOnUse" width="10" height="10">
-        <line x1="2" y1="0" x2="2" y2="10" stroke="#000" stroke-width="2" opacity="0.18"/>
-      </pattern>
-    </defs>
+def code_for_pid(pid: str, products: Dict[str, Product]) -> str:
     """
-
-
-def draw_ruler(svg: list[str], x: float, y: float, w: float, ticks: int = 70) -> None:
-    svg.append(f'<line x1="{x}" y1="{y}" x2="{x+w}" y2="{y}" stroke="{LX_BLUE}" stroke-width="2"/>')
-    for i in range(ticks + 1):
-        tx = x + (w * i / ticks)
-        h = 10 if i % 5 == 0 else 6
-        svg.append(f'<line x1="{tx}" y1="{y}" x2="{tx}" y2="{y+h}" stroke="{LX_BLUE}" stroke-width="1"/>')
-
-
-def components_svg(svg: str, height: int) -> None:
-    components.html(f"<div style='width:100%;overflow:visible'>{svg}</div>", height=height, scrolling=False)
-
-
-def auto_airbag_choice() -> Tuple[Tuple[int, int], float]:
-    return (7, 8), 6.0
+    Load Xpert in your PDF uses A/B/C codes in the item table.
+    If you have a real code source, wire it here.
+    Current fallback:
+      - Half Pack => A
+      - Full Pack => B
+      - (future) special SKUs => C
+    """
+    p = products.get(pid)
+    if p and p.is_half_pack:
+        return "A"
+    return "B"
 
 
 # =============================
-# Unique placement iteration (dedupe TURN span)
+# Canvas + Three.js renderer component
 # =============================
-def iter_unique_placements(
-    matrix: List[List[Optional[str]]],
+def render_loadxpert_routeA_component(
     *,
-    turn_spot: int,
-    floor_spots: int,
-) -> Iterable[Tuple[int, int, str]]:
-    blocked = blocked_spot_for_turn(turn_spot)
-    tiers = len(matrix[0]) if matrix else 0
-
-    for spot in range(1, floor_spots + 1):
-        col = matrix[spot - 1]
-        for t in range(tiers):
-            pid = col[t]
-            if pid is None or pid == BLOCK:
-                continue
-
-            if floor_spots == FLOOR_SPOTS_BOXCAR and spot == blocked:
-                pid_turn = matrix[turn_spot - 1][t]
-                if pid_turn == pid:
-                    continue
-
-            yield spot, t, pid
-
-
-# =============================
-# CG_above_TOR + stack stats
-# =============================
-def compute_payload_and_stack_stats(
-    matrix: List[List[Optional[str]]],
-    products: Dict[str, Product],
-    *,
-    turn_spot: int,
-    floor_spots: int,
-) -> Tuple[float, int, float, float, Dict[int, Dict[str, float]]]:
-    per_spot: Dict[int, Dict[str, float]] = {s: {"stack_h": 0.0, "spot_wt": 0.0, "tiers": 0.0} for s in range(1, floor_spots + 1)}
-    payload = 0.0
-    placed = 0
-
-    for spot, _, pid in iter_unique_placements(matrix, turn_spot=turn_spot, floor_spots=floor_spots):
-        p = products.get(pid)
-        if not p:
-            continue
-        payload += p.unit_weight_lbs
-        placed += 1
-        per_spot[spot]["stack_h"] += p.unit_height_in
-        per_spot[spot]["spot_wt"] += p.unit_weight_lbs
-        per_spot[spot]["tiers"] += 1.0
-
-    # Weighted average stack height by spot payload
-    num = 0.0
-    den = 0.0
-    for s in range(1, floor_spots + 1):
-        sh = per_spot[s]["stack_h"]
-        sw = per_spot[s]["spot_wt"]
-        if sh > 0 and sw > 0:
-            num += sh * sw
-            den += sw
-    avg_stack_weighted = (num / den) if den > 0 else 0.0
-
-    # Simple average across non-empty spots (fallback/reference)
-    sh_list = [per_spot[s]["stack_h"] for s in range(1, floor_spots + 1) if per_spot[s]["stack_h"] > 0]
-    avg_stack_simple = (sum(sh_list) / len(sh_list)) if sh_list else 0.0
-
-    return payload, placed, avg_stack_weighted, avg_stack_simple, per_spot
-
-
-def cg_above_tor(
-    *,
-    deck_height_TOR_in: float,
-    empty_car_CG_TOR_in: float,
-    tare_weight_lbs: float,
-    spring_deflection_in: float,
-    payload_weight_lbs: float,
-    avg_stack_height_in: float,
-) -> Tuple[Optional[float], Dict[str, float]]:
-    needed = [deck_height_TOR_in, empty_car_CG_TOR_in, tare_weight_lbs, payload_weight_lbs]
-    if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in needed):
-        return None, {}
-    if tare_weight_lbs <= 0 or payload_weight_lbs <= 0:
-        return None, {}
-
-    A = float(deck_height_TOR_in) - float(spring_deflection_in)
-    C = float(avg_stack_height_in) / 2.0 if avg_stack_height_in > 0 else 0.0
-    E = float(tare_weight_lbs)
-    F = float(payload_weight_lbs)
-    B = float(empty_car_CG_TOR_in)
-
-    cg = ((B * E) + ((A + C) * F)) / (E + F)
-    trace = {"A": A, "B": B, "C": C, "E": E, "F": F, "A_plus_C": (A + C)}
-    return cg, trace
-
-
-def cg_tier(cg_in: Optional[float], *, car_type_key: str) -> Tuple[str, str]:
-    if cg_in is None:
-        return "N/A", "⚪ N/A"
-    th = CG_THRESHOLDS_IN.get(car_type_key, CG_THRESHOLDS_IN["boxcar"])
-    if cg_in < th["preferred_lt"]:
-        return "Preferred", "🟢 Preferred"
-    if cg_in <= th["caution_le"]:
-        return "Caution", "🟡 Caution"
-    return "High Risk", "🔴 High Risk"
-
-
-# =============================
-# Validation
-# =============================
-def validate_airbag(airbag_gap_in: float) -> Tuple[str, str]:
-    if airbag_gap_in < 6.0:
-        return "FAIL", f'Airbag Space {airbag_gap_in:.1f}" is below 6.0" (too tight).'
-    if airbag_gap_in <= 9.0:
-        return "PASS", f'Airbag Space {airbag_gap_in:.1f}" is within preferred 6.0–9.0".'
-    if airbag_gap_in <= 10.0:
-        return "WARN", f'Airbag Space {airbag_gap_in:.1f}" is above preferred (6.0–9.0") but ≤ 10.0".'
-    return "FAIL", f'Airbag Space {airbag_gap_in:.1f}" exceeds 10.0" (not acceptable).'
-
-
-def validate_centerbeam_symmetry(per_spot_stats: Dict[int, Dict[str, float]]) -> Tuple[str, str]:
-    spots = sorted(per_spot_stats.keys())
-    mid = len(spots) // 2
-    left = sum(per_spot_stats[s]["spot_wt"] for s in spots[:mid])
-    right = sum(per_spot_stats[s]["spot_wt"] for s in spots[mid:])
-    total = left + right
-    if total <= 0:
-        return "WARN", "Symmetry check: no payload detected."
-    diff_pct = abs(left - right) / total * 100.0
-    if diff_pct <= 5.0:
-        return "PASS", f"Symmetry: left/right weight delta {diff_pct:.1f}% (≤ 5%)."
-    if diff_pct <= 10.0:
-        return "WARN", f"Symmetry: left/right weight delta {diff_pct:.1f}% (5–10%)."
-    return "FAIL", f"Symmetry: left/right weight delta {diff_pct:.1f}% (> 10%)."
-
-
-# =============================
-# Load Xpert-like PAGE renderer (Top + Side 1/2 + engineering + item table + legend)
-# =============================
-def render_loadxpert_top_side_page_svg(
-    *,
-    page_title: str,              # "Top + Side 1 View" / "Top + Side 2 View"
+    page_title: str,
     created_by: str,
     created_at: str,
     order_number: str,
@@ -605,277 +429,571 @@ def render_loadxpert_top_side_page_svg(
     matrix: List[List[Optional[str]]],
     products: Dict[str, Product],
     floor_spots: int,
+    max_tiers: int,
     turn_spot: int,
     airbag_gap_choice: Tuple[int, int],
     airbag_gap_in: float,
-    floor_spots_text: str,
-    cg_height_text: str,
-    cg_above_tor_text: str,
-    airbag_space_text: str,
-    wue_text: str,
-    lisa_text: str,
-    item_rows: List[dict],
-    side_flip: bool = False,
-) -> str:
-    W, H = 1400, 980
-    M = 20
+    code_colors: Dict[str, Dict[str, str]],
+    hatch_angle_deg: float,
+    hatch_spacing_px: float,
+    hatch_alpha: float,
+    # 3D calibration
+    cam_fov: float,
+    cam_x: float,
+    cam_y: float,
+    cam_z: float,
+    light_intensity: float,
+    ambient_intensity: float,
+    show_edges: bool,
+    flip_side: bool,
+    height_px: int = 1020,
+) -> None:
+    # Build per-cell representation for JS
+    tiers = len(matrix[0]) if matrix else max_tiers
+    tiers = max(1, int(tiers))
 
-    header_h = 125
-    top_block_h = 175
-    side_block_h = 265
-    eng_h = 70
-    item_h = 170
-    legend_h = 85
+    # Deduplicate TURN span in blocked spot (so 3D doesn't double-place)
+    blocked = blocked_spot_for_turn(turn_spot) if floor_spots == FLOOR_SPOTS_BOXCAR else None
 
-    y = M
-
-    svg: list[str] = []
-    svg.append(f'<svg width="{W}" height="{H}" xmlns="http://www.w3.org/2000/svg">')
-    svg.append(hatch_pattern_defs())
-
-    svg.append(f'<rect x="{M}" y="{M}" width="{W-2*M}" height="{H-2*M}" fill="white" stroke="{LX_GRID}" stroke-width="2"/>')
-
-    svg.append(f'<text x="{W/2}" y="{y+22}" font-size="20" font-weight="700" text-anchor="middle">{svg_escape(page_title)}</text>')
-    y += 30
-
-    # Header table
-    hx = M + 10
-    hy = y
-    hw = W - 2*M - 20
-    hh = header_h - 35
-
-    cols = [0.14, 0.22, 0.20, 0.22, 0.22]
-    cx = [hx]
-    for frac in cols[:-1]:
-        cx.append(cx[-1] + hw * frac)
-
-    svg.append(f'<rect x="{hx}" y="{hy}" width="{hw}" height="{hh}" fill="white" stroke="{LX_GRID}" stroke-width="2"/>')
-    for xline in cx[1:]:
-        svg.append(f'<line x1="{xline}" y1="{hy}" x2="{xline}" y2="{hy+hh}" stroke="{LX_GRID}" stroke-width="2"/>')
-    mid = hy + hh * 0.55
-    svg.append(f'<line x1="{hx}" y1="{mid}" x2="{hx+hw}" y2="{mid}" stroke="{LX_GRID}" stroke-width="2"/>')
-
-    headers = ["Created By", "Created At", "Order Number", "Vehicle Number", "PO Number"]
-    values = [created_by, created_at, order_number, vehicle_number, po_number]
-    for i in range(5):
-        x0 = cx[i]
-        svg.append(f'<text x="{x0+10}" y="{hy+24}" font-size="16" font-weight="700">{headers[i]}</text>')
-        svg.append(f'<text x="{x0+10}" y="{mid+30}" font-size="18">{svg_escape(values[i])}</text>')
-
-    y = hy + hh + 18
-
-    # TOP strip
-    top_x = M + 80
-    top_y = y + 10
-    top_w = W - 2*M - 160
-    top_h = top_block_h - 30
-
-    svg.append(f'<text x="{W/2}" y="{top_y-5}" font-size="18" font-weight="700" text-anchor="middle">Top</text>')
-    svg.append(f'<rect x="{top_x}" y="{top_y}" width="{top_w}" height="{top_h}" fill="white" stroke="{LX_BLUE}" stroke-width="3"/>')
-    draw_ruler(svg, top_x, top_y - 14, top_w, ticks=70)
-
-    def rep_pid_for_spot(s: int) -> Optional[str]:
-        col = matrix[s - 1]
-        return next((pid for pid in col if pid and pid != BLOCK), None)
-
-    spot_order = list(range(1, floor_spots + 1))
-    if side_flip:
-        spot_order = list(reversed(spot_order))
-
-    cell_w = top_w / floor_spots
-
-    for idx, spot in enumerate(spot_order):
-        pid = rep_pid_for_spot(spot)
-        x = top_x + idx * cell_w
-        fill = "#ffffff" if pid is None else color_for_pid(pid)
-        svg.append(f'<rect x="{x}" y="{top_y}" width="{cell_w}" height="{top_h}" fill="{fill}" stroke="{LX_BLUE}" stroke-width="1"/>')
-        if pid:
-            svg.append(
-                f'<text x="{x + cell_w/2}" y="{top_y + top_h/2}" font-size="22" font-weight="700" text-anchor="middle" '
-                f'transform="rotate(-90 {x + cell_w/2} {top_y + top_h/2})">{svg_escape(pid)}</text>'
-            )
-
-    # Doorway + airbag + turn hatch for boxcar
-    if floor_spots == FLOOR_SPOTS_BOXCAR:
-        door_left = top_x + (DOOR_START_SPOT - 1) * cell_w
-        door_right = top_x + DOOR_END_SPOT * cell_w
-        svg.append(f'<rect x="{door_left}" y="{top_y}" width="{door_right-door_left}" height="{top_h}" fill="white" opacity="0.55"/>')
-        svg.append(f'<rect x="{door_left}" y="{top_y}" width="{door_right-door_left}" height="{top_h}" fill="none" stroke="{LX_RED}" stroke-width="3"/>')
-        svg.append(f'<text x="{door_left+6}" y="{top_y-6}" font-size="12" fill="{LX_RED}">Doorway (Spots {DOOR_START_SPOT}-{DOOR_END_SPOT})</text>')
-
-        a, _b = airbag_gap_choice
-        air_x = top_x + a * cell_w
-        svg.append(f'<rect x="{air_x-3}" y="{top_y}" width="6" height="{top_h}" fill="{LX_RED2}" opacity="0.95"/>')
-        svg.append(f'<text x="{air_x}" y="{top_y+top_h+18}" font-size="12" fill="{LX_RED2}" text-anchor="middle">Airbag {airbag_gap_in:.1f}"</text>')
-
-        # Turn hatch region
-        blocked = blocked_spot_for_turn(turn_spot)
-        tzx = top_x + (turn_spot - 1) * cell_w
-        svg.append(f'<rect x="{tzx}" y="{top_y}" width="{cell_w*2}" height="{top_h}" fill="url(#hx_diag)" opacity="0.45" stroke="#111" stroke-width="1"/>')
-        svg.append(f'<text x="{tzx + cell_w}" y="{top_y+16}" font-size="12" text-anchor="middle">FORKLIFT TURN ({turn_spot}-{blocked})</text>')
-
-    y = top_y + top_h + 40
-
-    # SIDE strip
-    side_x = M + 80
-    side_y = y
-    side_w = W - 2*M - 160
-    side_h = side_block_h
-
-    side_label = "Side2" if side_flip else "Side1"
-    svg.append(f'<text x="{W/2}" y="{side_y-10}" font-size="18" font-weight="700" text-anchor="middle">{side_label}</text>')
-    svg.append(f'<rect x="{side_x}" y="{side_y}" width="{side_w}" height="{side_h}" fill="white" stroke="{LX_BLUE}" stroke-width="3"/>')
-
-    wheel_y = side_y + side_h - 22
-    for cxw in [side_x + side_w * 0.15, side_x + side_w * 0.22, side_x + side_w * 0.78, side_x + side_w * 0.85]:
-        svg.append(f'<circle cx="{cxw}" cy="{wheel_y}" r="14" fill="#666" opacity="0.6"/>')
-
-    inset = 10
-    lx = side_x + inset
-    ly = side_y + inset
-    lw = side_w - 2 * inset
-    lh = side_h - 2 * inset - 35
-
-    tiers = len(matrix[0]) if matrix else 0
-    tiers = max(1, tiers)
-
-    cw = lw / floor_spots
-    ch = lh / tiers
-
-    if floor_spots == FLOOR_SPOTS_BOXCAR:
-        door_left = lx + (DOOR_START_SPOT - 1) * cw
-        door_right = lx + DOOR_END_SPOT * cw
-        svg.append(f'<rect x="{door_left}" y="{ly}" width="{door_right-door_left}" height="{lh}" fill="white" opacity="0.55"/>')
-        svg.append(f'<rect x="{door_left}" y="{ly}" width="{door_right-door_left}" height="{lh}" fill="none" stroke="{LX_RED}" stroke-width="3"/>')
-
-        a, _b = airbag_gap_choice
-        air_x = lx + a * cw
-        svg.append(f'<rect x="{air_x-3}" y="{ly}" width="6" height="{lh}" fill="{LX_RED2}" opacity="0.95"/>')
-
-    blocked = blocked_spot_for_turn(turn_spot)
-
-    for idx, spot in enumerate(spot_order):
-        x = lx + idx * cw
-        svg.append(f'<rect x="{x}" y="{ly}" width="{cw}" height="{lh}" fill="none" stroke="#333" stroke-width="1" opacity="0.6"/>')
-        svg.append(f'<text x="{x + cw/2}" y="{ly + lh + 24}" font-size="12" text-anchor="middle" fill="#333">{spot}</text>')
-
-        col = matrix[spot - 1]
+    cells = []
+    for spot in range(1, floor_spots + 1):
         for t in range(tiers):
-            pid = col[t]
+            pid = matrix[spot - 1][t]
             if pid is None or pid == BLOCK:
                 continue
-
-            if floor_spots == FLOOR_SPOTS_BOXCAR and spot == blocked:
+            if floor_spots == FLOOR_SPOTS_BOXCAR and blocked == spot:
                 pid_turn = matrix[turn_spot - 1][t]
                 if pid_turn == pid:
                     continue
 
-            ycell = ly + lh - (t + 1) * ch
-            fill = color_for_pid(pid)
-            svg.append(f'<rect x="{x+1}" y="{ycell+1}" width="{cw-2}" height="{ch-2}" fill="{fill}" stroke="#111" stroke-width="1"/>')
-            svg.append(f'<text x="{x + cw/2}" y="{ycell + ch/2 + 5}" font-size="12" text-anchor="middle">{svg_escape(pid)}</text>')
+            p = products.get(pid)
+            cells.append(
+                {
+                    "spot": spot,
+                    "tier": t,  # 0 bottom
+                    "pid": pid,
+                    "code": code_for_pid(pid, products),
+                    "hp": bool(p.is_half_pack) if p else False,
+                    "unit_h": float(p.unit_height_in) if p else 20.0,
+                }
+            )
 
-    y = side_y + side_h + 16
+    payload = json.dumps(
+        {
+            "meta": {
+                "page_title": page_title,
+                "created_by": created_by,
+                "created_at": created_at,
+                "order_number": order_number,
+                "vehicle_number": vehicle_number,
+                "po_number": po_number,
+                "car_id": car_id,
+                "floor_spots": floor_spots,
+                "tiers": tiers,
+                "turn_spot": turn_spot,
+                "blocked_spot": blocked,
+                "airbag_choice": airbag_gap_choice,
+                "airbag_gap_in": airbag_gap_in,
+                "door_start": DOOR_START_SPOT,
+                "door_end": DOOR_END_SPOT,
+                "is_boxcar": floor_spots == FLOOR_SPOTS_BOXCAR,
+            },
+            "colors": code_colors,
+            "hatch": {
+                "angle_deg": hatch_angle_deg,
+                "spacing_px": hatch_spacing_px,
+                "alpha": hatch_alpha,
+            },
+            "three": {
+                "cam_fov": cam_fov,
+                "cam_pos": [cam_x, cam_y, cam_z],
+                "light_intensity": light_intensity,
+                "ambient_intensity": ambient_intensity,
+                "show_edges": show_edges,
+            },
+            "flip_side": flip_side,
+            "cells": cells,
+        }
+    )
 
-    # Engineering row
-    ex = M + 20
-    ey = y
-    ew = W - 2*M - 40
-    eh = eng_h
+    # NOTE: canvas does precise font measurement via ctx.measureText using Helvetica stack
+    # Rotated text fitting uses a decrement loop to match "fit-to-rect" rules.
+    html = f"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body {{ margin:0; padding:0; background:#fff; font-family: Helvetica, Arial, sans-serif; }}
+  .wrap {{
+    display:flex; flex-direction:row; gap:18px; padding:14px;
+  }}
+  .panel {{
+    border:0;
+  }}
+  canvas {{
+    background:#fff;
+    border:1px solid #ddd;
+  }}
+  #page {{
+    width: 1420px;
+    height: 980px;
+  }}
+  #three {{
+    width: 520px;
+    height: 980px;
+  }}
+  .note {{
+    font-size: 12px; color:#444; padding: 0 14px 14px 14px;
+  }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="page" width="1420" height="980"></canvas>
+  <div class="panel">
+    <canvas id="three" width="520" height="980"></canvas>
+  </div>
+</div>
+<script>
+const DATA = {payload};
 
-    svg.append(f'<rect x="{ex}" y="{ey}" width="{ew}" height="{eh}" fill="white" stroke="{LX_GRID}" stroke-width="2"/>')
-    ecols = [0.14, 0.16, 0.18, 0.16, 0.18, 0.18]  # add CG_above_TOR column
-    exs = [ex]
-    for frac in ecols[:-1]:
-        exs.append(exs[-1] + ew * frac)
-    for xline in exs[1:]:
-        svg.append(f'<line x1="{xline}" y1="{ey}" x2="{xline}" y2="{ey+eh}" stroke="{LX_GRID}" stroke-width="1.5"/>')
+// --------- helpers ----------
+function hexToRgba(hex, a=1.0) {{
+  const h = hex.replace('#','').trim();
+  const bigint = parseInt(h.length===3 ? h.split('').map(c=>c+c).join('') : h, 16);
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  return `rgba(${{r}}, ${{g}}, ${{b}}, ${{a}})`;
+}}
 
-    # Top line labels
-    labels = ["Floor spots =", "C.G. height =", "CG_above_TOR =", "Airbag Space =", "Whole Unit Equivalent =", "Total LISA Units ="]
-    values = [floor_spots_text, cg_height_text, cg_above_tor_text, airbag_space_text, wue_text, lisa_text]
+function drawHatch(ctx, x, y, w, h, angleDeg, spacing, alpha, color="#000") {{
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.rect(x, y, w, h);
+  ctx.clip();
 
-    for i in range(6):
-        x0 = exs[i]
-        svg.append(f'<text x="{x0+10}" y="{ey+24}" font-size="14" font-weight="700">{labels[i]}</text>')
-        svg.append(f'<text x="{x0+150}" y="{ey+24}" font-size="14">{svg_escape(values[i])}</text>')
+  const angle = angleDeg * Math.PI / 180;
+  const diag = Math.sqrt(w*w + h*h);
+  const cx = x + w/2, cy = y + h/2;
 
-    y = ey + eh + 10
+  ctx.translate(cx, cy);
+  ctx.rotate(angle);
+  ctx.translate(-cx, -cy);
 
-    # Item table
-    tx = M + 20
-    ty = y
-    tw = W - 2*M - 40
-    th = item_h
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
 
-    svg.append(f'<rect x="{tx}" y="{ty}" width="{tw}" height="{th}" fill="white" stroke="{LX_GRID}" stroke-width="2"/>')
+  const start = -diag;
+  const end = diag*2;
+  for (let i = start; i < end; i += spacing) {{
+    ctx.beginPath();
+    ctx.moveTo(x + i, y - diag);
+    ctx.lineTo(x + i, y + h + diag);
+    ctx.stroke();
+  }}
 
-    col_fracs = [0.10, 0.08, 0.62, 0.20]
-    xs = [tx]
-    for frac in col_fracs[:-1]:
-        xs.append(xs[-1] + tw * frac)
-    for xline in xs[1:]:
-        svg.append(f'<line x1="{xline}" y1="{ty}" x2="{xline}" y2="{ty+th}" stroke="{LX_GRID}" stroke-width="1.5"/>')
+  ctx.restore();
+}}
 
-    rows = max(1, len(item_rows))
-    rh = th / (rows + 1)
-    for r in range(1, rows + 1):
-        yline = ty + r * rh
-        svg.append(f'<line x1="{tx}" y1="{yline}" x2="{tx+tw}" y2="{yline}" stroke="{LX_GRID}" stroke-width="1.0"/>')
+function fitRotatedText(ctx, text, rectW, rectH, fontFamily, maxPx, minPx, weight="700") {{
+  // Fit text rotated -90 into a vertical cell: text length maps to rectH
+  // We simulate by measuring unrotated width and treating it like "height" after rotate.
+  let fs = maxPx;
+  while (fs >= minPx) {{
+    ctx.font = `${{weight}} ${{fs}}px ${{fontFamily}}`;
+    const m = ctx.measureText(text);
+    const tw = m.width;
+    // After rotation, tw corresponds to available rectH minus margins
+    if (tw <= rectH * 0.92 && fs <= rectW * 0.92) {{
+      return fs;
+    }}
+    fs -= 1;
+  }}
+  return minPx;
+}}
 
-    svg.append(f'<text x="{tx+10}" y="{ty+rh*0.7}" font-size="14" font-weight="700">ITEM</text>')
-    svg.append(f'<text x="{xs[1]+10}" y="{ty+rh*0.7}" font-size="14" font-weight="700">Code</text>')
-    svg.append(f'<text x="{xs[2]+10}" y="{ty+rh*0.7}" font-size="14" font-weight="700">Description</text>')
-    svg.append(f'<text x="{xs[3]+10}" y="{ty+rh*0.7}" font-size="14" font-weight="700">Product Id</text>')
+function fitNormalText(ctx, text, rectW, rectH, fontFamily, maxPx, minPx, weight="700") {{
+  let fs = maxPx;
+  while (fs >= minPx) {{
+    ctx.font = `${{weight}} ${{fs}}px ${{fontFamily}}`;
+    const m = ctx.measureText(text);
+    if (m.width <= rectW * 0.92 && fs <= rectH * 0.72) {{
+      return fs;
+    }}
+    fs -= 1;
+  }}
+  return minPx;
+}}
 
-    for i, r in enumerate(item_rows[:6]):
-        yy = ty + (i + 1) * rh + rh * 0.7
-        svg.append(f'<text x="{tx+10}" y="{yy}" font-size="13">{svg_escape(r.get("item",""))}</text>')
-        svg.append(f'<text x="{xs[1]+10}" y="{yy}" font-size="13">{svg_escape(r.get("code",""))}</text>')
-        svg.append(f'<text x="{xs[2]+10}" y="{yy}" font-size="13">{svg_escape(r.get("desc",""))}</text>')
-        svg.append(f'<text x="{xs[3]+10}" y="{yy}" font-size="13">{svg_escape(r.get("pid",""))}</text>')
+// --------- 2D page draw ----------
+(function drawPage() {{
+  const canvas = document.getElementById('page');
+  const ctx = canvas.getContext('2d');
+  const M = 18;
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
 
-    y = ty + th + 12
+  // Outer border
+  ctx.strokeStyle = "{LX_GRID}";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(M, M, W-2*M, H-2*M);
 
-    # Legend
-    lxg = M + 20
-    lyg = y
-    lwg = W - 2*M - 40
-    lhg = legend_h
+  // Title
+  ctx.fillStyle = "#111";
+  ctx.font = "700 20px Helvetica, Arial, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(DATA.meta.page_title, W/2, M+24);
 
-    svg.append(f'<rect x="{lxg}" y="{lyg}" width="{lwg}" height="{lhg}" fill="white" stroke="{LX_GRID}" stroke-width="2"/>')
+  // Header table
+  const hx = M+10, hy = M+40;
+  const hw = W-2*M-20, hh = 88;
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "{LX_GRID}";
+  ctx.strokeRect(hx, hy, hw, hh);
 
-    pad = 12
-    box = 34
-    xcur = lxg + pad
-    ymid = lyg + lhg / 2 + 6
+  const colFracs = [0.14,0.22,0.20,0.22,0.22];
+  const colX = [hx];
+  for (let i=0;i<colFracs.length-1;i++) colX.push(colX[colX.length-1] + hw*colFracs[i]);
 
-    svg.append(f'<rect x="{xcur}" y="{lyg+18}" width="{box}" height="{box}" fill="url(#hx_diag)" stroke="#000" stroke-width="1"/>')
-    svg.append(f'<text x="{xcur+box+10}" y="{ymid}" font-size="12">Diagonally hatched Loads must be restrained from sliding</text>')
-    xcur += 520
+  for (let i=1;i<colX.length;i++) {{
+    ctx.beginPath(); ctx.moveTo(colX[i], hy); ctx.lineTo(colX[i], hy+hh); ctx.stroke();
+  }}
+  const midY = hy + hh*0.55;
+  ctx.beginPath(); ctx.moveTo(hx, midY); ctx.lineTo(hx+hw, midY); ctx.stroke();
 
-    svg.append(f'<rect x="{xcur}" y="{lyg+18}" width="{box}" height="{box}" fill="url(#hx_vert)" stroke="#000" stroke-width="1"/>')
-    svg.append(f'<text x="{xcur+box+10}" y="{ymid}" font-size="12">Vertically hatched Loads must be restrained from tipping and sliding</text>')
-    xcur += 560
+  const headers = ["Created By","Created At","Order Number","Vehicle Number","PO Number"];
+  const vals = [DATA.meta.created_by, DATA.meta.created_at, DATA.meta.order_number, DATA.meta.vehicle_number, DATA.meta.po_number];
 
-    svg.append(f'<text x="{xcur}" y="{ymid}" font-size="12">Any securement system used must prevent movement of all Loads blocked by the hatched Load</text>')
+  ctx.textAlign = "left";
+  for (let i=0;i<5;i++) {{
+    const x0 = colX[i];
+    ctx.font = "700 16px Helvetica, Arial, sans-serif";
+    ctx.fillText(headers[i], x0+10, hy+24);
+    ctx.font = "400 18px Helvetica, Arial, sans-serif";
+    ctx.fillText(vals[i], x0+10, midY+30);
+  }}
 
-    svg.append("</svg>")
-    return "\n".join(svg)
+  // Top strip
+  const topX = M+80, topY = hy+hh+28;
+  const topW = W-2*M-160, topH = 140;
+  ctx.textAlign = "center";
+  ctx.font = "700 18px Helvetica, Arial, sans-serif";
+  ctx.fillText("Top", W/2, topY-8);
 
+  ctx.strokeStyle = "{LX_BLUE}";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(topX, topY, topW, topH);
 
-# =============================
-# Item table rows (basic)
-# =============================
-def build_item_rows_from_requests(reqs: List[RequestLine], products: Dict[str, Product]) -> List[dict]:
-    rows = []
-    for i, r in enumerate(reqs, start=1):
-        p = products.get(r.product_id)
-        if not p:
-            continue
-        code = "A" if p.is_half_pack else "B"
-        rows.append({"item": str(i), "code": code, "desc": f"(Qty: {r.tiers}) {p.description}", "pid": p.product_id})
-    return rows[:6]
+  // Ruler
+  const rulerY = topY - 14;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(topX, rulerY); ctx.lineTo(topX+topW, rulerY); ctx.stroke();
+  const ticks = 70;
+  ctx.lineWidth = 1;
+  for (let i=0;i<=ticks;i++) {{
+    const tx = topX + (topW * i / ticks);
+    const hh2 = (i%5===0) ? 10 : 6;
+    ctx.beginPath(); ctx.moveTo(tx, rulerY); ctx.lineTo(tx, rulerY+hh2); ctx.stroke();
+  }}
+
+  const spots = DATA.meta.floor_spots;
+  const cellW = topW / spots;
+
+  // representative PID per spot
+  const rep = new Map();
+  for (const c of DATA.cells) {{
+    if (!rep.has(c.spot)) rep.set(c.spot, c.pid);
+  }}
+
+  const order = [];
+  for (let s=1;s<=spots;s++) order.push(s);
+  if (DATA.flip_side) order.reverse();
+
+  for (let i=0;i<order.length;i++) {{
+    const spot = order[i];
+    const pid = rep.get(spot) || null;
+    const x = topX + i*cellW;
+    ctx.fillStyle = "#fff";
+    if (pid) {{
+      const code = rep.has(spot) ? (DATA.cells.find(z=>z.spot===spot)?.code || "B") : "B";
+      const col = DATA.colors[code] || DATA.colors["B"];
+      ctx.fillStyle = col.fill;
+    }}
+    ctx.fillRect(x, topY, cellW, topH);
+    ctx.strokeStyle = "{LX_BLUE}";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, topY, cellW, topH);
+
+    if (pid) {{
+      // rotated fit
+      const fontFamily = "Helvetica, Arial, sans-serif";
+      const fs = fitRotatedText(ctx, pid, cellW, topH, fontFamily, 26, 10, "700");
+      ctx.save();
+      ctx.translate(x + cellW/2, topY + topH/2);
+      ctx.rotate(-Math.PI/2);
+      ctx.font = `700 ${{fs}}px ${{fontFamily}}`;
+      ctx.fillStyle = "#111";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(pid, 0, 0);
+      ctx.restore();
+    }}
+  }}
+
+  // Doorway + airbag + turn hatch (boxcar only)
+  if (DATA.meta.is_boxcar) {{
+    const doorLeft = topX + (DATA.meta.door_start - 1)*cellW;
+    const doorRight = topX + (DATA.meta.door_end)*cellW;
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.fillRect(doorLeft, topY, doorRight-doorLeft, topH);
+    ctx.strokeStyle = "{LX_RED}";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(doorLeft, topY, doorRight-doorLeft, topH);
+    ctx.font = "400 12px Helvetica, Arial, sans-serif";
+    ctx.fillStyle = "{LX_RED}";
+    ctx.textAlign = "left";
+    ctx.fillText(`Doorway (Spots ${DATA.meta.door_start}-${DATA.meta.door_end})`, doorLeft+6, topY-4);
+
+    const a = DATA.meta.airbag_choice[0];
+    const airX = topX + a*cellW;
+    ctx.fillStyle = "{LX_RED2}";
+    ctx.fillRect(airX-3, topY, 6, topH);
+    ctx.fillStyle = "{LX_RED2}";
+    ctx.textAlign = "center";
+    ctx.fillText(`Airbag ${DATA.meta.airbag_gap_in.toFixed(1)}"`, airX, topY+topH+16);
+
+    // Turn hatch region (diagonal)
+    const tz = topX + (DATA.meta.turn_spot - 1)*cellW;
+    drawHatch(ctx, tz, topY, cellW*2, topH, DATA.hatch.angle_deg, DATA.hatch.spacing_px, DATA.hatch.alpha, "#000");
+    ctx.strokeStyle = "#111";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tz, topY, cellW*2, topH);
+    ctx.fillStyle = "#111";
+    ctx.font = "400 12px Helvetica, Arial, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(`FORKLIFT TURN (${DATA.meta.turn_spot}-${DATA.meta.blocked_spot})`, tz+cellW, topY+16);
+  }}
+
+  // Side strip
+  const sideX = M+80, sideY = topY+topH+60;
+  const sideW = W-2*M-160, sideH = 260;
+
+  ctx.textAlign = "center";
+  ctx.font = "700 18px Helvetica, Arial, sans-serif";
+  ctx.fillStyle = "#111";
+  ctx.fillText(DATA.flip_side ? "Side2" : "Side1", W/2, sideY-10);
+
+  ctx.strokeStyle = "{LX_BLUE}";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(sideX, sideY, sideW, sideH);
+
+  // Wheels
+  const wy = sideY + sideH - 22;
+  const wheelXs = [sideX+sideW*0.15, sideX+sideW*0.22, sideX+sideW*0.78, sideX+sideW*0.85];
+  for (const wx of wheelXs) {{
+    ctx.beginPath();
+    ctx.fillStyle = "rgba(102,102,102,0.6)";
+    ctx.arc(wx, wy, 14, 0, Math.PI*2);
+    ctx.fill();
+  }}
+
+  const inset = 10;
+  const lx = sideX+inset, ly = sideY+inset;
+  const lw = sideW-2*inset, lh = sideH-2*inset-35;
+
+  const cw = lw / spots;
+  const tiers = DATA.meta.tiers;
+  const ch = lh / tiers;
+
+  // doorway cutout + airbag (boxcar only)
+  if (DATA.meta.is_boxcar) {{
+    const dl = lx + (DATA.meta.door_start - 1)*cw;
+    const dr = lx + (DATA.meta.door_end)*cw;
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.fillRect(dl, ly, dr-dl, lh);
+    ctx.strokeStyle = "{LX_RED}";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(dl, ly, dr-dl, lh);
+
+    const a2 = DATA.meta.airbag_choice[0];
+    const ax = lx + a2*cw;
+    ctx.fillStyle = "{LX_RED2}";
+    ctx.fillRect(ax-3, ly, 6, lh);
+  }}
+
+  // grid + spot numbers
+  ctx.strokeStyle = "rgba(51,51,51,0.6)";
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#333";
+  ctx.font = "400 12px Helvetica, Arial, sans-serif";
+  ctx.textAlign = "center";
+  for (let i=0;i<order.length;i++) {{
+    const spot = order[i];
+    const x = lx + i*cw;
+    ctx.strokeRect(x, ly, cw, lh);
+    ctx.fillText(String(spot), x+cw/2, ly+lh+24);
+  }}
+
+  // blocks
+  for (const c of DATA.cells) {{
+    // map spot -> visual index (after flip)
+    const idx = order.indexOf(c.spot);
+    if (idx < 0) continue;
+
+    const x = lx + idx*cw;
+    const y = ly + lh - (c.tier+1)*ch;
+    const col = DATA.colors[c.code] || DATA.colors["B"];
+
+    ctx.fillStyle = col.fill;
+    ctx.strokeStyle = "#111";
+    ctx.lineWidth = 1;
+    ctx.fillRect(x+1, y+1, cw-2, ch-2);
+    ctx.strokeRect(x+1, y+1, cw-2, ch-2);
+
+    // centered pid text (fit)
+    const fontFamily = "Helvetica, Arial, sans-serif";
+    const fs = fitNormalText(ctx, c.pid, cw-6, ch-6, fontFamily, 14, 8, "400");
+    ctx.font = `400 ${{fs}}px ${{fontFamily}}`;
+    ctx.fillStyle = "#111";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(c.pid, x+cw/2, y+ch/2);
+  }}
+
+  // Legend (simple)
+  const legY = sideY + sideH + 22;
+  ctx.strokeStyle = "{LX_GRID}";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(M+20, legY, W-2*M-40, 84);
+
+  const box = 34;
+  let xcur = M+32;
+  ctx.fillStyle = "#111";
+  ctx.font = "400 12px Helvetica, Arial, sans-serif";
+  // diag
+  drawHatch(ctx, xcur, legY+18, box, box, DATA.hatch.angle_deg, DATA.hatch.spacing_px, DATA.hatch.alpha, "#000");
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
+  ctx.strokeRect(xcur, legY+18, box, box);
+  ctx.fillText("Diagonally hatched Loads must be restrained from sliding", xcur+box+250, legY+42);
+  xcur += 520;
+  // vert
+  // vertical hatch is just angle 90
+  drawHatch(ctx, xcur, legY+18, box, box, 90, DATA.hatch.spacing_px, DATA.hatch.alpha, "#000");
+  ctx.strokeRect(xcur, legY+18, box, box);
+  ctx.fillText("Vertically hatched Loads must be restrained from tipping and sliding", xcur+box+270, legY+42);
+}})();
+</script>
+
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script>
+(function drawThree() {{
+  const canvas = document.getElementById('three');
+  const ctx2d = canvas.getContext('2d');
+  ctx2d.clearRect(0,0,canvas.width, canvas.height);
+
+  const renderer = new THREE.WebGLRenderer({{ canvas: canvas, antialias: true, alpha: false }});
+  renderer.setSize(canvas.width, canvas.height, false);
+  renderer.setPixelRatio(window.devicePixelRatio ? Math.min(2, window.devicePixelRatio) : 1);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xffffff);
+
+  const fov = DATA.three.cam_fov;
+  const aspect = canvas.width / canvas.height;
+  const camera = new THREE.PerspectiveCamera(fov, aspect, 0.1, 1000);
+  camera.position.set(DATA.three.cam_pos[0], DATA.three.cam_pos[1], DATA.three.cam_pos[2]);
+  camera.lookAt(0, 0, 0);
+
+  const ambient = new THREE.AmbientLight(0xffffff, DATA.three.ambient_intensity);
+  scene.add(ambient);
+
+  const dir = new THREE.DirectionalLight(0xffffff, DATA.three.light_intensity);
+  dir.position.set(8, 12, 10);
+  scene.add(dir);
+
+  // Ground grid (subtle)
+  const grid = new THREE.GridHelper(20, 20, 0xcccccc, 0xeeeeee);
+  grid.position.y = -0.01;
+  scene.add(grid);
+
+  // Build 3D blocks: spots along X, tiers along Y, depth along Z
+  const spots = DATA.meta.floor_spots;
+  const tiers = DATA.meta.tiers;
+
+  // Normalize geometry sizes
+  const spotW = 0.9;
+  const spotD = DATA.meta.is_boxcar ? 1.1 : 0.9;
+  const tierH = 0.22;  // visual height per tier
+
+  const x0 = -(spots * spotW) / 2 + spotW/2;
+
+  // Optional: show doorway "void" area by skipping blocks there (boxcar)
+  function isDoorSpot(spot) {{
+    return DATA.meta.is_boxcar && spot >= DATA.meta.door_start && spot <= DATA.meta.door_end;
+  }}
+
+  // Material cache per code
+  const mats = new Map();
+  function matForCode(code) {{
+    if (mats.has(code)) return mats.get(code);
+    const col = (DATA.colors[code] || DATA.colors["B"]).fill;
+    const m = new THREE.MeshLambertMaterial({{ color: new THREE.Color(col) }});
+    mats.set(code, m);
+    return m;
+  }}
+
+  // Edge outline material
+  const edgeMat = new THREE.LineBasicMaterial({{ color: 0x111111, linewidth: 1 }});
+
+  // Group for centering
+  const group = new THREE.Group();
+  scene.add(group);
+
+  for (const c of DATA.cells) {{
+    // Skip doorway blocks? Load Xpert shows side view with doorway cutout but blocks may still appear depending on view.
+    // We'll keep them visible by default. If you want "hard void", uncomment:
+    // if (isDoorSpot(c.spot)) continue;
+
+    const spotIndex = (DATA.flip_side) ? (spots - c.spot) : (c.spot - 1);
+    const x = x0 + spotIndex * spotW;
+    const y = (c.tier + 0.5) * tierH;
+    const z = 0;
+
+    const geo = new THREE.BoxGeometry(spotW*0.96, tierH*0.92, spotD*0.92);
+    const mesh = new THREE.Mesh(geo, matForCode(c.code));
+    mesh.position.set(x, y, z);
+    group.add(mesh);
+
+    if (DATA.three.show_edges) {{
+      const edges = new THREE.EdgesGeometry(geo);
+      const line = new THREE.LineSegments(edges, edgeMat);
+      line.position.copy(mesh.position);
+      group.add(line);
+    }}
+  }}
+
+  // Simple "car frame" outline
+  const frameGeo = new THREE.BoxGeometry(spots*spotW*1.02, tiers*tierH*1.02 + 0.1, spotD*1.05);
+  const frameEdges = new THREE.EdgesGeometry(frameGeo);
+  const frame = new THREE.LineSegments(frameEdges, new THREE.LineBasicMaterial({{ color: 0x0b2a7a }}));
+  frame.position.set(0, (tiers*tierH)/2, 0);
+  group.add(frame);
+
+  // Animate (steady)
+  function render() {{
+    renderer.render(scene, camera);
+    requestAnimationFrame(render);
+  }}
+  render();
+}})();
+</script>
+</body>
+</html>
+"""
+    components.html(html, height=height_px, scrolling=True)
 
 
 # =============================
@@ -892,33 +1010,33 @@ if "requests" not in st.session_state:
 if "matrix" not in st.session_state:
     st.session_state.matrix = make_empty_matrix(4, 7, FLOOR_SPOTS_BOXCAR)
 
-# Sidebar — formal structure
+# Sidebar
 with st.sidebar:
-    st.header("Settings")
+    st.header("Route A Controls")
 
-    order_number = st.text_input("Order Number", value="")
-    po_number = st.text_input("PO Number", value="")
-    commodity_type = st.selectbox("Commodity Type", ["Plywood", "OSB", "Lumber"], index=0)
+    car_type = st.selectbox("Car Type", ["Boxcar (15)", "Centerbeam (18)"], index=0)
+    is_boxcar = car_type.startswith("Boxcar")
+    floor_spots = FLOOR_SPOTS_BOXCAR if is_boxcar else FLOOR_SPOTS_CENTERBEAM
 
-    car_type = st.selectbox("Car Type", ["Boxcar", "Centerbeam"], index=0)
-    car_type_key = "boxcar" if car_type.lower().startswith("box") else "centerbeam"
-    floor_spots = FLOOR_SPOTS_BOXCAR if car_type_key == "boxcar" else FLOOR_SPOTS_CENTERBEAM
-
-    car_spec_source = st.selectbox("Car Spec Source", ["Manual Override", "UMLER"], index=0)
     car_id = st.text_input("Vehicle Number / Car ID", value="TBOX632012")
+    order_number = st.text_input("Order Number", value="—")
+    po_number = st.text_input("PO Number", value="—")
+    created_by = st.text_input("Created By", value="—")
+    created_at = st.text_input("Created At", value="—")
+    vehicle_number = st.text_input("Vehicle Number (label)", value="—")
 
     st.divider()
 
-    max_tiers = st.slider("Max tiers per spot", 1, 8, 4)
+    max_tiers = st.slider("Max tiers per spot", 1, 10, 4)
 
-    if car_type_key == "boxcar":
+    if is_boxcar:
         turn_spot = int(st.selectbox("Turn spot (must be 7 or 8)", ["7", "8"], index=0))
-        required_turn_tiers = st.slider("Turn tiers required (HARD)", 1, 8, int(max_tiers))
+        required_turn_tiers = st.slider("Turn tiers required (HARD)", 0, int(max_tiers), int(max_tiers))
         required_turn_tiers = min(int(required_turn_tiers), int(max_tiers))
 
         auto_airbag = st.checkbox('Auto airbag (prefer <= 9")', value=True)
         if auto_airbag:
-            airbag_gap_choice, airbag_gap_in = auto_airbag_choice()
+            airbag_gap_choice, airbag_gap_in = (7, 8), 6.0
         else:
             gap_labels = [f"{a}-{b}" for a, b in AIRBAG_ALLOWED_GAPS]
             gap_choice_label = st.selectbox("Airbag location", gap_labels, index=1)
@@ -930,28 +1048,44 @@ with st.sidebar:
         airbag_gap_choice = (7, 8)
         airbag_gap_in = 0.0
 
-    view_mode = st.radio("View", ["Top + Side pages (PDF)", "Side1 only", "Side2 only"], index=0)
+    st.divider()
+    st.subheader("Exact-style A/B/C Colors")
+    colA = st.color_picker("A Fill", DEFAULT_CODE_COLORS["A"]["fill"])
+    colB = st.color_picker("B Fill", DEFAULT_CODE_COLORS["B"]["fill"])
+    colC = st.color_picker("C Fill", DEFAULT_CODE_COLORS["C"]["fill"])
+    code_colors = {
+        "A": {"fill": colA, "stroke": DEFAULT_CODE_COLORS["A"]["stroke"]},
+        "B": {"fill": colB, "stroke": DEFAULT_CODE_COLORS["B"]["stroke"]},
+        "C": {"fill": colC, "stroke": DEFAULT_CODE_COLORS["C"]["stroke"]},
+        "TURN": DEFAULT_CODE_COLORS["TURN"],
+    }
 
     st.divider()
-
-    with st.expander("Engineering Inputs (CG + Axle)", expanded=False):
-        st.caption("CG_above_TOR requires deck height, empty car CG, tare weight, spring deflection, and payload.")
-        if car_spec_source == "UMLER":
-            st.info("UMLER source selected. Wire lookup here (read-only fields) or switch to Manual Override for now.")
-
-        deck_height_TOR_in = st.number_input("Deck height above TOR (in)", min_value=0.0, value=60.0, step=0.25)
-        empty_car_CG_TOR_in = st.number_input("Empty car CG above TOR (in)", min_value=0.0, value=62.0, step=0.25)
-        tare_weight_lbs = st.number_input("Tare weight (lb)", min_value=0.0, value=82000.0, step=100.0)
-        spring_deflection_in = st.number_input("Spring deflection (in)", min_value=0.0, value=0.0, step=0.05)
-
-        payload_override_on = st.checkbox("Override payload weight (lb)", value=False)
-        payload_override_lbs = st.number_input("Payload override (lb)", min_value=0.0, value=0.0, step=100.0, disabled=(not payload_override_on))
+    st.subheader("Hatch Calibration")
+    hatch_angle_deg = st.slider("Hatch angle (deg)", 0.0, 90.0, 45.0, 1.0)
+    hatch_spacing_px = st.slider("Hatch spacing (px)", 4.0, 20.0, 10.0, 1.0)
+    hatch_alpha = st.slider("Hatch opacity", 0.05, 0.6, 0.18, 0.01)
 
     st.divider()
+    st.subheader("3D Calibration (Camera / Light)")
+    cam_fov = st.slider("Camera FOV", 20.0, 75.0, 42.0, 1.0)
+    cam_x = st.slider("Camera X", -30.0, 30.0, 10.0, 0.5)
+    cam_y = st.slider("Camera Y", 0.0, 30.0, 10.0, 0.5)
+    cam_z = st.slider("Camera Z", -40.0, 40.0, 18.0, 0.5)
+    light_intensity = st.slider("Directional light", 0.2, 3.0, 1.2, 0.1)
+    ambient_intensity = st.slider("Ambient light", 0.0, 2.0, 0.65, 0.05)
+    show_edges = st.checkbox("3D edges/outline", value=True)
 
+    st.divider()
+    flip_side = st.checkbox("Render Side2 (flip)", value=False)
+
+    st.divider()
     generate_btn = st.button("Generate Diagram", type="primary")
     clear_btn = st.button("Clear All")
 
+if clear_btn:
+    st.session_state.requests = []
+    st.session_state.matrix = make_empty_matrix(int(max_tiers), int(turn_spot), int(floor_spots))
 
 st.success(f"Product Master loaded: {len(pm):,} rows")
 
@@ -978,37 +1112,22 @@ if search.strip():
         | (pm_cf[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_cf.columns else False)
     ].copy()
 
-sort_cols, ascending = [], []
-if COL_THICK in pm_cf.columns:
-    sort_cols.append(COL_THICK); ascending.append(False)
-if COL_WIDTH in pm_cf.columns:
-    sort_cols.append(COL_WIDTH); ascending.append(False)
-if COL_LENGTH in pm_cf.columns:
-    sort_cols.append(COL_LENGTH); ascending.append(False)
-sort_cols.append(COL_PRODUCT_ID); ascending.append(True)
-
-pm_cf = pm_cf.sort_values(by=sort_cols, ascending=ascending, na_position="last")
 pm_cf = pm_cf.drop_duplicates(subset=[COL_PRODUCT_ID], keep="first").head(5000)
-
 options = pm_cf.to_dict("records")
 
 
 def option_label(r: dict) -> str:
     pid = str(r.get(COL_PRODUCT_ID, "")).strip()
     desc = str(r.get(COL_DESC, "")).strip()
-    edge = str(r.get(COL_EDGE, "")).strip()
     wt = r.get(COL_UNIT_WT)
-
+    hp = ""
     if COL_HALF_PACK in pm_cf.columns:
         hp = " HP" if _truthy(r.get(COL_HALF_PACK, "")) else ""
     else:
         hp = " HP" if desc.upper().rstrip().endswith("HP") else ""
-
     parts = [f"{pid}{hp}"]
     if pd.notna(wt):
         parts.append(f"{float(wt):,.0f} lbs")
-    if edge:
-        parts.append(edge)
     if desc:
         parts.append(desc)
     return " | ".join(parts)
@@ -1025,11 +1144,7 @@ with c2:
 with c3:
     optimize_btn = st.button("Optimize Layout")
 with c4:
-    st.write("")  # spacer
-
-if clear_btn:
-    st.session_state.requests = []
-    st.session_state.matrix = make_empty_matrix(int(max_tiers), int(turn_spot), int(floor_spots))
+    st.write("")
 
 if add_line and selected_label:
     idx = labels.index(selected_label)
@@ -1051,10 +1166,10 @@ if st.session_state.requests:
         rows.append({"Sales Product Id": r.product_id, "Description": p.description if p else "", "Tiers": r.tiers})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, height=220)
 else:
-    st.info("Add one or more SKUs, then click Generate Diagram / Optimize Layout.")
+    st.info("Add one or more SKUs, then Optimize Layout, then Generate Diagram.")
 
 msgs: List[str] = []
-if generate_btn or optimize_btn:
+if optimize_btn:
     if not st.session_state.requests:
         st.warning("No request lines to optimize.")
     else:
@@ -1071,151 +1186,42 @@ if generate_btn or optimize_btn:
 for m in msgs:
     st.warning(m)
 
-matrix = st.session_state.matrix
-
-payload_calc_lbs, placed, avg_stack_weighted_in, avg_stack_simple_in, per_spot_stats = compute_payload_and_stack_stats(
-    matrix, products, turn_spot=int(turn_spot), floor_spots=int(floor_spots)
-)
-
-payload_used_lbs = float(payload_override_lbs) if payload_override_on else float(payload_calc_lbs)
-
-cg_in, cg_trace = cg_above_tor(
-    deck_height_TOR_in=float(deck_height_TOR_in),
-    empty_car_CG_TOR_in=float(empty_car_CG_TOR_in),
-    tare_weight_lbs=float(tare_weight_lbs),
-    spring_deflection_in=float(spring_deflection_in),
-    payload_weight_lbs=float(payload_used_lbs),
-    avg_stack_height_in=float(avg_stack_weighted_in),
-)
-tier_label, tier_chip = cg_tier(cg_in, car_type_key=car_type_key)
-
-cg_height_in = None
-if cg_trace:
-    cg_height_in = cg_trace.get("A_plus_C")
-
-# =============================
-# Summary + validations
-# =============================
-st.subheader("Engineering Summary")
-
-colA, colB, colC = st.columns(3)
-with colA:
-    st.metric("Payload (lb)", f"{payload_used_lbs:,.0f}" + (" (override)" if payload_override_on else ""))
-with colB:
-    st.metric("Placed tiers", f"{placed:,}")
-with colC:
-    st.metric("Avg stack height (in)", f"{avg_stack_weighted_in:,.2f}")
-
-st.write(f"**CG_above_TOR tier:** {tier_chip}")
-
-st.subheader("Validations")
-if car_type_key == "boxcar":
-    s, msg = validate_airbag(float(airbag_gap_in))
-    (st.success if s == "PASS" else st.warning if s == "WARN" else st.error)(msg)
-
-if cg_in is None:
-    st.error("CG_above_TOR is N/A (missing/invalid engineering inputs or payload).")
-else:
-    if tier_label == "Preferred":
-        st.success(f"CG_above_TOR {cg_in:.2f} in is in Preferred range.")
-    elif tier_label == "Caution":
-        st.warning(f"CG_above_TOR {cg_in:.2f} in is in Caution range (manual awareness).")
+if generate_btn:
+    if not st.session_state.requests:
+        st.warning("No request lines to render.")
     else:
-        st.error(f"CG_above_TOR {cg_in:.2f} in is High Risk — manual approval required.")
+        # Ensure matrix exists even if not optimized yet
+        if not st.session_state.matrix or len(st.session_state.matrix) != floor_spots:
+            st.session_state.matrix = make_empty_matrix(int(max_tiers), int(turn_spot), int(floor_spots))
 
-if car_type_key == "centerbeam":
-    s, msg = validate_centerbeam_symmetry(per_spot_stats)
-    (st.success if s == "PASS" else st.warning if s == "WARN" else st.error)(msg)
-
-with st.expander("Calculation Trace (CG)", expanded=False):
-    if not cg_trace:
-        st.info("No CG trace available (missing required inputs or payload).")
-    else:
-        st.write(
-            {
-                "A = deck_height_TOR - spring_deflection (in)": round(cg_trace["A"], 4),
-                "B = empty_car_CG_TOR (in)": round(cg_trace["B"], 4),
-                "C = load CG above deck (in)": round(cg_trace["C"], 4),
-                "A + C (load CG above TOR) (in)": round(cg_trace["A_plus_C"], 4),
-                "E = tare weight (lb)": round(cg_trace["E"], 1),
-                "F = payload weight (lb)": round(cg_trace["F"], 1),
-            }
+        render_loadxpert_routeA_component(
+            page_title="Top + Side View (Route A)",
+            created_by=str(created_by if created_by != "—" else facility_selected),
+            created_at=str(created_at),
+            order_number=str(order_number),
+            vehicle_number=str(vehicle_number),
+            po_number=str(po_number),
+            car_id=str(car_id),
+            matrix=st.session_state.matrix,
+            products=products,
+            floor_spots=int(floor_spots),
+            max_tiers=int(max_tiers),
+            turn_spot=int(turn_spot),
+            airbag_gap_choice=airbag_gap_choice,
+            airbag_gap_in=float(airbag_gap_in),
+            code_colors=code_colors,
+            hatch_angle_deg=float(hatch_angle_deg),
+            hatch_spacing_px=float(hatch_spacing_px),
+            hatch_alpha=float(hatch_alpha),
+            cam_fov=float(cam_fov),
+            cam_x=float(cam_x),
+            cam_y=float(cam_y),
+            cam_z=float(cam_z),
+            light_intensity=float(light_intensity),
+            ambient_intensity=float(ambient_intensity),
+            show_edges=bool(show_edges),
+            flip_side=bool(flip_side),
+            height_px=1040,
         )
-        st.latex(r"CG_{above\_TOR} = \frac{(B \cdot E) + ((A + C)\cdot F)}{E + F}")
-
-# =============================
-# Diagram View — Load Xpert-style pages
-# =============================
-item_rows = build_item_rows_from_requests(st.session_state.requests, products)
-
-floor_spots_text = str(floor_spots)
-cg_height_text = "N/A" if cg_height_in is None else f"{cg_height_in:.2f} (in)"
-cg_above_tor_text = "N/A" if cg_in is None else f"{cg_in:.2f} (in)"
-airbag_space_text = "N/A" if car_type_key != "boxcar" else f"{float(airbag_gap_in):.2f} (in)"
-wue_text = "—"   # wire later
-lisa_text = "—"  # wire later
-
-created_by = facility_selected if facility_selected != "(All facilities)" else "—"
-created_at = "—"  # wire later if desired
-order_num = order_number or "—"
-vehicle_num = "UML_TBOX" if car_type_key == "boxcar" else "UML_CENTERBEAM"
-po_num = po_number or "—"
-
-page_svg_side1 = render_loadxpert_top_side_page_svg(
-    page_title="Top + Side 1 View",
-    created_by=str(created_by),
-    created_at=str(created_at),
-    order_number=str(order_num),
-    vehicle_number=str(vehicle_num),
-    po_number=str(po_num),
-    car_id=car_id,
-    matrix=matrix,
-    products=products,
-    floor_spots=int(floor_spots),
-    turn_spot=int(turn_spot),
-    airbag_gap_choice=airbag_gap_choice,
-    airbag_gap_in=float(airbag_gap_in),
-    floor_spots_text=floor_spots_text,
-    cg_height_text=cg_height_text,
-    cg_above_tor_text=cg_above_tor_text,
-    airbag_space_text=airbag_space_text,
-    wue_text=wue_text,
-    lisa_text=lisa_text,
-    item_rows=item_rows,
-    side_flip=False,
-)
-
-page_svg_side2 = render_loadxpert_top_side_page_svg(
-    page_title="Top + Side 2 View",
-    created_by=str(created_by),
-    created_at=str(created_at),
-    order_number=str(order_num),
-    vehicle_number=str(vehicle_num),
-    po_number=str(po_num),
-    car_id=car_id,
-    matrix=matrix,
-    products=products,
-    floor_spots=int(floor_spots),
-    turn_spot=int(turn_spot),
-    airbag_gap_choice=airbag_gap_choice,
-    airbag_gap_in=float(airbag_gap_in),
-    floor_spots_text=floor_spots_text,
-    cg_height_text=cg_height_text,
-    cg_above_tor_text=cg_above_tor_text,
-    airbag_space_text=airbag_space_text,
-    wue_text=wue_text,
-    lisa_text=lisa_text,
-    item_rows=item_rows,
-    side_flip=True,
-)
-
-st.subheader("Diagram View (Load Xpert format)")
-
-if view_mode == "Side1 only":
-    components_svg(page_svg_side1, height=1000)
-elif view_mode == "Side2 only":
-    components_svg(page_svg_side2, height=1000)
 else:
-    components_svg(page_svg_side1, height=1000)
-    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-    components_svg(page_svg_side2, height=1000)
+    st.caption("Click **Generate Diagram** to render the Canvas 2D page + Three.js 3D panel.")
