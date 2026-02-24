@@ -1,24 +1,24 @@
 # streamlit_app.py
-# LoadXpert Route A — Presentation1 Rules Integrated
+# LoadXpert Route A — Presentation1 Rules Integrated (Grant doorway = 2-spot bays)
 #
-# Includes (from Presentation1.pdf):
-# - % Blocked -> Strapping requirement (No / Double / 2-unit double / 4-unit double)
-# - Diagonal hatch = cord strap required due to step-down
-# - Honeycomb dunnage (3") required if void exists between tiers
-# - CG_above_TOR calculation and PASS/WARN/FAIL gate
-# - Optional "Grant Loading" doorway method (horizontal stacks at doorway)
-# - Weight-balance metric + soft penalty in optimizer (basic)
-# - Close-top / stagger soft penalty (basic)
+# Key behaviors:
+# - NORMAL doorway: 6/7/8/9 are independent 1-spot columns (but TOP labels in doorway render horizontal like PDF).
+# - GRANT doorway: two horizontal bays per tier: (6–7) and (8–9). Each placement consumes 2 spots.
+# - Forklift TURN: consumes 2 spots at turn_spot and turn_spot+1 for required tiers (hard).
+# - Presentation1 rules:
+#   * %Blocked -> Strapping requirement text
+#   * Diagonal hatch = cord strap required due to step-down (only if straps_required by %blocked table)
+#   * Honeycomb dunnage (3") required if a void exists between tiers
+#   * CG_above_TOR = ((B*E)+((A+C)*F))/(E+F) + PASS/WARN/FAIL
 #
-# NOTE:
-# - This implements the rules deterministically, but exact pixel-match to LoadXpert’s PDF
-#   requires their embedded fonts + their proprietary A/B/C mapping + their exact “r-label”
-#   scheme. This file focuses on correct rule-driven behavior + visuals aligned to those rules.
+# Notes:
+# - A/B/C mapping is still a placeholder. Replace code_for_pid() with your true mapping logic.
+# - Exact pixel-perfect font metrics to LoadXpert PDFs requires their exact font files and their exact layout constants.
+#   This file focuses on correct rule logic + consistent rendering structure (doorway bays, turn span, hatching meaning).
 
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -30,8 +30,8 @@ import streamlit.components.v1 as components
 # =============================
 # Page
 # =============================
-st.set_page_config(page_title="Load Diagram Optimizer — Route A (Rules Integrated)", layout="wide")
-st.title("Load Diagram Optimizer — Route A (Presentation1 rules integrated)")
+st.set_page_config(page_title="Load Diagram Optimizer — Route A", layout="wide")
+st.title("Load Diagram Optimizer — Route A (Grant doorway = 2-spot bays)")
 
 MASTER_PATH = "data/Ortec SP Product Master.xlsx"
 
@@ -62,26 +62,20 @@ FLOOR_SPOTS = 15
 
 DOOR_START_SPOT = 6
 DOOR_END_SPOT = 9
+DOOR_SPOTS = [6, 7, 8, 9]
+DOOR_BAYS_GRANT = [(6, 7), (8, 9)]  # Grant method: 2 bays only
 
 DOORFRAME_NO_ME = {6, 9}
 DOORPOCKET_PINS = {7, 8}
 
 AIRBAG_ALLOWED_GAPS = [(6, 7), (7, 8), (8, 9)]
 
-# Visual constants
-LX_BLUE = "#0b2a7a"
-LX_RED = "#c00000"
-LX_RED2 = "#d00000"
-LX_GRID = "#000000"
-
-# Close-to-PDF fills (tune via sidebar)
+# Default colors (tunable)
 DEFAULT_CODE_COLORS = {
     "A": {"fill": "#79C7C7", "stroke": "#111111"},  # teal-ish
     "B": {"fill": "#F4F48A", "stroke": "#111111"},  # yellow-ish
     "C": {"fill": "#2FB34B", "stroke": "#111111"},  # green-ish
 }
-
-# Hatch defaults (tune via sidebar)
 DEFAULT_HATCH = {"angle_deg": 45.0, "spacing_px": 8.0, "alpha": 0.22}
 
 
@@ -110,7 +104,6 @@ class Product:
 
     @property
     def is_tg(self) -> bool:
-        # Basic inference: tune as needed (Presentation shows T&G handling)
         s = (self.description or "").upper()
         return ("T&G" in s) or ("TNG" in s) or ("TONGUE" in s and "GROOVE" in s)
 
@@ -132,15 +125,15 @@ class SecurementDecision:
 @dataclass
 class AnalysisResult:
     heights_by_spot: Dict[int, int]
-    step_down_boundaries: List[Tuple[int, int]]  # boundary between spot a and b (adjacent)
-    hatched_spots: List[int]  # spots to hatch (derived from step-down)
+    step_down_boundaries: List[Tuple[int, int]]
+    hatched_spots: List[int]
     honeycomb_required: bool
     honeycomb_spots: List[int]
     securement: SecurementDecision
     payload_lbs: float
     cg_above_tor_in: float
     cg_status: str
-    weight_balance_ratio: float  # 0=perfect, 1=terrible (approx)
+    weight_balance_ratio: float
 
 
 # =============================
@@ -223,7 +216,7 @@ def lookup_product(df: pd.DataFrame, pid: str) -> Product:
 
 
 # =============================
-# Turn rules
+# Turn + Occupancy rules
 # =============================
 def blocked_spot_for_turn(turn_spot: int) -> int:
     return turn_spot + 1
@@ -233,15 +226,24 @@ def is_blocked_spot(spot: int, turn_spot: int) -> bool:
     return spot == blocked_spot_for_turn(turn_spot)
 
 
-def occupied_spots_for_placement(spot: int, turn_spot: int) -> List[int]:
-    # Turn consumes 2 spots at a tier
+def occupied_spots_for_placement(spot: int, turn_spot: int, grant_mode: bool) -> List[int]:
+    # Forklift turn consumes 2 spots always
     if spot == turn_spot:
         return [spot, blocked_spot_for_turn(turn_spot)]
+
+    # Grant method: doorway placements consume 2 spots (bay)
+    if grant_mode and spot in DOOR_SPOTS:
+        if spot in (6, 7):
+            return [6, 7]
+        if spot in (8, 9):
+            return [8, 9]
+
+    # Normal: 1 spot
     return [spot]
 
 
 # =============================
-# Placement matrix
+# Placement matrix helpers
 # =============================
 def make_empty_matrix(max_tiers: int, turn_spot: int) -> List[List[Optional[str]]]:
     m = [[None for _ in range(max_tiers)] for _ in range(FLOOR_SPOTS)]
@@ -252,10 +254,12 @@ def make_empty_matrix(max_tiers: int, turn_spot: int) -> List[List[Optional[str]
     return m
 
 
-def next_empty_tier_index(matrix: List[List[Optional[str]]], spot: int, turn_spot: int) -> Optional[int]:
+def next_empty_tier_index(
+    matrix: List[List[Optional[str]]], spot: int, turn_spot: int, grant_mode: bool
+) -> Optional[int]:
     if is_blocked_spot(spot, turn_spot):
         return None
-    occ = occupied_spots_for_placement(spot, turn_spot)
+    occ = occupied_spots_for_placement(spot, turn_spot, grant_mode)
     tiers = len(matrix[0])
     for t in range(tiers):
         if all(matrix[s - 1][t] is None for s in occ):
@@ -263,19 +267,20 @@ def next_empty_tier_index(matrix: List[List[Optional[str]]], spot: int, turn_spo
     return None
 
 
-def place_pid(matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: str, turn_spot: int) -> None:
-    for s in occupied_spots_for_placement(spot, turn_spot):
+def place_pid(
+    matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: str, turn_spot: int, grant_mode: bool
+) -> None:
+    for s in occupied_spots_for_placement(spot, turn_spot, grant_mode):
         matrix[s - 1][tier_idx] = pid
 
 
 # =============================
-# Rules (hard + soft)
+# Hard + Soft rules
 # =============================
-def can_place_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot: int) -> Tuple[bool, str]:
+def can_place_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot: int, grant_mode: bool) -> Tuple[bool, str]:
     p = products[pid]
-    occ = occupied_spots_for_placement(spot, turn_spot)
+    occ = occupied_spots_for_placement(spot, turn_spot, grant_mode)
 
-    # Machine edge restriction in doorway frame spots
     if p.is_machine_edge and any(s in DOORFRAME_NO_ME for s in occ):
         return False, "Machine Edge not allowed in doorframe spots 6/9 (or any placement that touches them)."
 
@@ -290,16 +295,17 @@ def soft_penalty(
     max_tiers: int,
     spot: int,
     matrix: List[List[Optional[str]]],
-    turn_spot: int,
     close_top_weight: int,
     weight_balance_weight: int,
     tg_safety_weight: int,
+    stagger_weight: int,
 ) -> int:
     """
-    Soft goals from Presentation:
-    - Close top: avoid isolated peaks
-    - Weight balance: keep left-right roughly even
-    - T&G: prefer "safer" tiers (simple heuristic)
+    Soft goals:
+    - Close top (avoid big isolated towers)
+    - Weight balance (penalize distance from center)
+    - T&G tier safety (avoid extremes)
+    - Stagger rule (avoid placing same SKU adjacent in same tier)
     """
     p = products[pid]
     penalty = 0
@@ -308,15 +314,11 @@ def soft_penalty(
     if p.is_half_pack and tier_idx == (max_tiers - 1):
         penalty += 120
 
-    # T&G tier preference (simple):
-    # prefer mid tiers vs bottom/top extremes
-    if p.is_tg:
-        # penalize lowest and highest tier
-        if tier_idx in (0, max_tiers - 1):
-            penalty += tg_safety_weight
+    # T&G: penalize bottom/top extremes
+    if p.is_tg and tier_idx in (0, max_tiers - 1):
+        penalty += tg_safety_weight
 
-    # Close-top: penalize creating a tower above neighbors
-    # compare neighbor heights if placed here
+    # Close-top: tower penalty
     if close_top_weight > 0:
         def height_at(s: int) -> int:
             if s < 1 or s > FLOOR_SPOTS:
@@ -328,16 +330,25 @@ def soft_penalty(
         right = height_at(spot + 1)
         cur = height_at(spot)
         new_h = max(cur, tier_idx + 1)
-        # if new height exceeds both neighbors by >=2, penalize
         if new_h - max(left, right) >= 2:
             penalty += close_top_weight
 
-    # Weight balance: penalize adding weight far from center
+    # Weight balance: distance from center
     if weight_balance_weight > 0:
-        # center between spots 7 and 8. distance based on spot index
         center = 7.5
         dist = abs(spot - center)
         penalty += int(weight_balance_weight * dist)
+
+    # Stagger: penalize same PID adjacent on same tier
+    if stagger_weight > 0:
+        left_pid = matrix[spot - 2][tier_idx] if spot - 1 >= 1 else None
+        right_pid = matrix[spot][tier_idx] if spot + 1 <= FLOOR_SPOTS else None
+        if left_pid == pid:
+            penalty += stagger_weight
+        if right_pid == pid:
+            penalty += stagger_weight
+        if left_pid == pid and right_pid == pid:
+            penalty += stagger_weight
 
     return penalty
 
@@ -365,14 +376,16 @@ def pop_best(
     max_tiers: int,
     matrix: List[List[Optional[str]]],
     turn_spot: int,
+    grant_mode: bool,
     close_top_weight: int,
     weight_balance_weight: int,
     tg_safety_weight: int,
+    stagger_weight: int,
 ) -> Optional[str]:
     best_i = None
     best_score = None
     for i, pid in enumerate(tokens):
-        ok, _ = can_place_hard(products, pid, spot, turn_spot)
+        ok, _ = can_place_hard(products, pid, spot, turn_spot, grant_mode)
         if not ok:
             continue
         score = soft_penalty(
@@ -382,10 +395,10 @@ def pop_best(
             max_tiers=max_tiers,
             spot=spot,
             matrix=matrix,
-            turn_spot=turn_spot,
             close_top_weight=close_top_weight,
             weight_balance_weight=weight_balance_weight,
             tg_safety_weight=tg_safety_weight,
+            stagger_weight=stagger_weight,
         )
         if best_score is None or score < best_score:
             best_score = score
@@ -404,16 +417,17 @@ def force_turn_tiers(
     max_tiers: int,
     turn_spot: int,
     required_turn_tiers: int,
+    grant_mode: bool,
     msgs: List[str],
     close_top_weight: int,
     weight_balance_weight: int,
     tg_safety_weight: int,
+    stagger_weight: int,
 ) -> None:
     required_turn_tiers = max(0, min(required_turn_tiers, max_tiers))
     for t in range(required_turn_tiers):
         if matrix[turn_spot - 1][t] not in (None, BLOCK):
             continue
-
         pid = pop_best(
             tokens,
             products=products,
@@ -422,14 +436,16 @@ def force_turn_tiers(
             max_tiers=max_tiers,
             matrix=matrix,
             turn_spot=turn_spot,
+            grant_mode=grant_mode,
             close_top_weight=close_top_weight,
             weight_balance_weight=weight_balance_weight,
             tg_safety_weight=tg_safety_weight,
+            stagger_weight=stagger_weight,
         )
         if pid is None:
             msgs.append(f"TURN HARD RULE: could not place a legal tier into TURN spot at Tier {t+1}.")
             return
-        place_pid(matrix, turn_spot, t, pid, turn_spot)
+        place_pid(matrix, turn_spot, t, pid, turn_spot, grant_mode)
 
 
 def optimize_layout(
@@ -438,15 +454,16 @@ def optimize_layout(
     max_tiers: int,
     turn_spot: int,
     required_turn_tiers: int,
+    grant_mode: bool,
     close_top_weight: int,
     weight_balance_weight: int,
     tg_safety_weight: int,
+    stagger_weight: int,
 ) -> Tuple[List[List[Optional[str]]], List[str]]:
     msgs: List[str] = []
     tokens = build_token_list(products, requests)
     matrix = make_empty_matrix(max_tiers, turn_spot)
 
-    # Force TURN usage first
     force_turn_tiers(
         matrix,
         products,
@@ -454,20 +471,27 @@ def optimize_layout(
         max_tiers,
         turn_spot,
         required_turn_tiers,
+        grant_mode,
         msgs,
         close_top_weight,
         weight_balance_weight,
         tg_safety_weight,
+        stagger_weight,
     )
 
     outside = [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]
-    doorway = [7, 8, 6, 9]
+    if grant_mode:
+        # only bay-representatives; each consumes 2 spots
+        doorway = [6, 8]
+    else:
+        doorway = [7, 8, 6, 9]
+
     order = [s for s in outside + doorway if not is_blocked_spot(s, turn_spot)]
 
     while tokens:
         placed_any = False
         for spot in order:
-            t = next_empty_tier_index(matrix, spot, turn_spot)
+            t = next_empty_tier_index(matrix, spot, turn_spot, grant_mode)
             if t is None:
                 continue
 
@@ -479,31 +503,33 @@ def optimize_layout(
                 max_tiers=max_tiers,
                 matrix=matrix,
                 turn_spot=turn_spot,
+                grant_mode=grant_mode,
                 close_top_weight=close_top_weight,
                 weight_balance_weight=weight_balance_weight,
                 tg_safety_weight=tg_safety_weight,
+                stagger_weight=stagger_weight,
             )
             if pid is None:
                 continue
 
-            # PIN preference: if Machine Edge, try 7/8 at same tier
+            # PIN preference: if Machine Edge, try 7/8 at same tier (if available)
             if products[pid].is_machine_edge:
                 for pin_spot in [7, 8]:
                     if is_blocked_spot(pin_spot, turn_spot):
                         continue
-                    tpin = next_empty_tier_index(matrix, pin_spot, turn_spot)
+                    tpin = next_empty_tier_index(matrix, pin_spot, turn_spot, grant_mode)
                     if tpin == t:
-                        ok, _ = can_place_hard(products, pid, pin_spot, turn_spot)
+                        ok, _ = can_place_hard(products, pid, pin_spot, turn_spot, grant_mode)
                         if ok:
                             spot = pin_spot
                             break
 
-            ok, why = can_place_hard(products, pid, spot, turn_spot)
+            ok, why = can_place_hard(products, pid, spot, turn_spot, grant_mode)
             if not ok:
                 msgs.append(f"Skipped {pid} at spot {spot}, tier {t+1}: {why}")
                 continue
 
-            place_pid(matrix, spot, t, pid, turn_spot)
+            place_pid(matrix, spot, t, pid, turn_spot, grant_mode)
             placed_any = True
 
         if not placed_any:
@@ -519,86 +545,52 @@ def optimize_layout(
 # Presentation1 Rules: %Blocked -> Strapping
 # =============================
 def decide_strapping(percent_blocked: float) -> SecurementDecision:
-    """
-    Presentation1 page 3 rule table:
-
-    x > 90% blocked -> straps: No
-    50% < x < 90%  -> straps: Yes (Double strapping)
-    x < 50%        -> straps: Yes (2-unit double strapping)
-    x < 10%        -> straps: Yes (4-unit double strapping)
-
-    Interpreting boundaries deterministically:
-    - if x > 90: No straps
-    - elif x >= 50: Double strapping
-    - elif x >= 10: 2-unit double strapping
-    - else: 4-unit double strapping
-    """
     x = float(percent_blocked)
     if x > 90.0:
-        return SecurementDecision(
-            percent_blocked=x,
-            straps_required=False,
-            strap_text="Straps: No",
-            hatch_legend="(No cord strap required)",
-        )
+        return SecurementDecision(x, False, "Straps: No", "(No cord strap required)")
     if x >= 50.0:
-        return SecurementDecision(
-            percent_blocked=x,
-            straps_required=True,
-            strap_text="Straps: Yes — Double strapping",
-            hatch_legend="Diagonal hatch = cord strap required (step-down)",
-        )
+        return SecurementDecision(x, True, "Straps: Yes — Double strapping", "Diagonal hatch = cord strap required (step-down)")
     if x >= 10.0:
-        return SecurementDecision(
-            percent_blocked=x,
-            straps_required=True,
-            strap_text="Straps: Yes — 2-unit double strapping",
-            hatch_legend="Diagonal hatch = cord strap required (step-down)",
-        )
-    return SecurementDecision(
-        percent_blocked=x,
-        straps_required=True,
-        strap_text="Straps: Yes — 4-unit double strapping",
-        hatch_legend="Diagonal hatch = cord strap required (step-down)",
-    )
+        return SecurementDecision(x, True, "Straps: Yes — 2-unit double strapping", "Diagonal hatch = cord strap required (step-down)")
+    return SecurementDecision(x, True, "Straps: Yes — 4-unit double strapping", "Diagonal hatch = cord strap required (step-down)")
 
 
 # =============================
 # Analysis: step-down, voids, %blocked, CG
 # =============================
-def compute_spot_heights(matrix: List[List[Optional[str]]], turn_spot: int) -> Dict[int, int]:
+def compute_spot_heights(matrix: List[List[Optional[str]]], turn_spot: int, grant_mode: bool) -> Dict[int, int]:
     heights: Dict[int, int] = {}
     blocked = blocked_spot_for_turn(turn_spot)
+
     for s in range(1, FLOOR_SPOTS + 1):
         col = matrix[s - 1]
         h = sum(1 for x in col if x and x != BLOCK)
         heights[s] = h
-    # Make blocked spot height mirror the TURN spot to reflect the “span”
+
+    # Turn span mirror
     if 1 <= blocked <= FLOOR_SPOTS:
         heights[blocked] = heights.get(turn_spot, 0)
+
+    # Grant bays should be equalized within each bay (6–7 and 8–9)
+    if grant_mode:
+        for a, b in DOOR_BAYS_GRANT:
+            ha, hb = heights.get(a, 0), heights.get(b, 0)
+            m = max(ha, hb)
+            heights[a] = m
+            heights[b] = m
+
     return heights
 
 
-def detect_step_down_boundaries(heights: Dict[int, int], *, ignore_spots: Optional[set] = None) -> List[Tuple[int, int]]:
-    """
-    A step-down boundary exists where adjacent stack heights differ.
-    """
-    ignore_spots = ignore_spots or set()
+def detect_step_down_boundaries(heights: Dict[int, int]) -> List[Tuple[int, int]]:
     out: List[Tuple[int, int]] = []
     for s in range(1, FLOOR_SPOTS):
-        a, b = s, s + 1
-        if a in ignore_spots or b in ignore_spots:
-            continue
-        if heights.get(a, 0) != heights.get(b, 0):
-            out.append((a, b))
+        if heights.get(s, 0) != heights.get(s + 1, 0):
+            out.append((s, s + 1))
     return out
 
 
 def determine_hatched_spots_from_step_down(boundaries: List[Tuple[int, int]], heights: Dict[int, int]) -> List[int]:
-    """
-    Presentation1: diagonal hatch indicates cord strap required due to step-down.
-    We hatch the *higher side* of each step-down boundary (more conservative).
-    """
     hs = set()
     for a, b in boundaries:
         ha, hb = heights.get(a, 0), heights.get(b, 0)
@@ -609,10 +601,6 @@ def determine_hatched_spots_from_step_down(boundaries: List[Tuple[int, int]], he
 
 
 def detect_honeycomb_voids(matrix: List[List[Optional[str]]], turn_spot: int) -> Tuple[bool, List[int]]:
-    """
-    Presentation1: use 3" honeycomb dunnage when there is a void in between tiers.
-    Void definition: in a given spot, a None exists below a filled tier (i.e., gap within stack).
-    """
     void_spots: List[int] = []
     blocked = blocked_spot_for_turn(turn_spot)
     for s in range(1, FLOOR_SPOTS + 1):
@@ -620,7 +608,6 @@ def detect_honeycomb_voids(matrix: List[List[Optional[str]]], turn_spot: int) ->
             continue
         col = matrix[s - 1]
         seen_filled_above = False
-        # scan from top to bottom
         for v in reversed(col):
             if v is None:
                 if seen_filled_above:
@@ -633,10 +620,7 @@ def detect_honeycomb_voids(matrix: List[List[Optional[str]]], turn_spot: int) ->
 
 def compute_percent_blocked(matrix: List[List[Optional[str]]], turn_spot: int) -> float:
     """
-    Practical %blocked proxy (needs your official definition later):
-    %blocked = occupied floor spots / available floor spots
-    - available excludes the blocked spot (turn_spot+1)
-    - occupied means spot has at least one tier loaded (ignoring BLOCK)
+    Proxy: occupied floor spots / available floor spots (excluding the blocked turn spot+1)
     """
     blocked = blocked_spot_for_turn(turn_spot)
     avail = FLOOR_SPOTS - 1
@@ -647,9 +631,7 @@ def compute_percent_blocked(matrix: List[List[Optional[str]]], turn_spot: int) -
         col = matrix[s - 1]
         if any(v and v != BLOCK for v in col):
             occ += 1
-    if avail <= 0:
-        return 0.0
-    return 100.0 * (occ / avail)
+    return 0.0 if avail <= 0 else 100.0 * (occ / avail)
 
 
 def compute_payload_lbs(matrix: List[List[Optional[str]]], products: Dict[str, Product]) -> float:
@@ -662,10 +644,6 @@ def compute_payload_lbs(matrix: List[List[Optional[str]]], products: Dict[str, P
 
 
 def compute_weight_balance_ratio(matrix: List[List[Optional[str]]], products: Dict[str, Product]) -> float:
-    """
-    Simple weight-balance metric: compare total weight left vs right of center (7.5).
-    ratio = abs(L-R) / (L+R)
-    """
     center = 7.5
     left = 0.0
     right = 0.0
@@ -679,42 +657,16 @@ def compute_weight_balance_ratio(matrix: List[List[Optional[str]]], products: Di
         else:
             right += w
     total = left + right
-    if total <= 0:
-        return 0.0
-    return abs(left - right) / total
+    return 0.0 if total <= 0 else abs(left - right) / total
 
 
-def compute_cg_above_tor(
-    *,
-    A_deck_above_tor_minus_deflection: float,
-    B_empty_car_cg_above_tor: float,
-    E_tare_weight: float,
-    F_load_weight: float,
-    C_load_cg_above_deck: float,
-) -> float:
-    """
-    Stored formula:
-    CG_above_TOR = ((B*E)+((A+C)*F))/(E+F)
-    """
-    E = float(E_tare_weight)
-    F = float(F_load_weight)
+def compute_cg_above_tor(A: float, B: float, E: float, F: float, C: float) -> float:
     if (E + F) <= 0:
         return 0.0
-    A = float(A_deck_above_tor_minus_deflection)
-    B = float(B_empty_car_cg_above_tor)
-    C = float(C_load_cg_above_deck)
     return ((B * E) + ((A + C) * F)) / (E + F)
 
 
 def estimate_load_cg_above_deck(matrix: List[List[Optional[str]]], products: Dict[str, Product]) -> float:
-    """
-    Estimate C (load CG above deck):
-    - compute weighted average unit height across placed tiers, then
-    - assume CG at half of the average stack height.
-
-    This is a fallback; you can override via sidebar.
-    """
-    # avg unit height
     heights = []
     for s in range(1, FLOOR_SPOTS + 1):
         for pid in matrix[s - 1]:
@@ -724,7 +676,6 @@ def estimate_load_cg_above_deck(matrix: List[List[Optional[str]]], products: Dic
         return 0.0
     avg_unit_h = float(sum(heights) / len(heights))
 
-    # estimate average stack tiers among occupied spots
     spot_tiers = []
     for s in range(1, FLOOR_SPOTS + 1):
         col = matrix[s - 1]
@@ -734,7 +685,6 @@ def estimate_load_cg_above_deck(matrix: List[List[Optional[str]]], products: Dic
     if not spot_tiers:
         return 0.0
     avg_tiers = float(sum(spot_tiers) / len(spot_tiers))
-
     stack_h = avg_tiers * avg_unit_h
     return stack_h / 2.0
 
@@ -744,15 +694,16 @@ def analyze_layout(
     matrix: List[List[Optional[str]]],
     products: Dict[str, Product],
     turn_spot: int,
-    A_deck_above_tor_minus_deflection: float,
-    B_empty_car_cg_above_tor: float,
-    E_tare_weight: float,
+    grant_mode: bool,
+    A_deck: float,
+    B_empty_cg: float,
+    E_tare: float,
     cg_limit_in: float,
-    override_C_load_cg_above_deck: Optional[float],
+    override_C: Optional[float],
 ) -> AnalysisResult:
-    heights = compute_spot_heights(matrix, turn_spot)
+    heights = compute_spot_heights(matrix, turn_spot, grant_mode)
     boundaries = detect_step_down_boundaries(heights)
-    hatched_spots = determine_hatched_spots_from_step_down(boundaries, heights)
+    hatched = determine_hatched_spots_from_step_down(boundaries, heights)
 
     honeycomb_required, honeycomb_spots = detect_honeycomb_voids(matrix, turn_spot)
 
@@ -761,14 +712,8 @@ def analyze_layout(
 
     payload = compute_payload_lbs(matrix, products)
     C_est = estimate_load_cg_above_deck(matrix, products)
-    C = float(override_C_load_cg_above_deck) if override_C_load_cg_above_deck is not None else C_est
-    cg = compute_cg_above_tor(
-        A_deck_above_tor_minus_deflection=A_deck_above_tor_minus_deflection,
-        B_empty_car_cg_above_tor=B_empty_car_cg_above_tor,
-        E_tare_weight=E_tare_weight,
-        F_load_weight=payload,
-        C_load_cg_above_deck=C,
-    )
+    C = float(override_C) if override_C is not None else C_est
+    cg = compute_cg_above_tor(float(A_deck), float(B_empty_cg), float(E_tare), float(payload), float(C))
     status = "PASS" if cg <= cg_limit_in else ("WARN" if cg <= (cg_limit_in * 1.03) else "FAIL")
 
     wb = compute_weight_balance_ratio(matrix, products)
@@ -776,7 +721,7 @@ def analyze_layout(
     return AnalysisResult(
         heights_by_spot=heights,
         step_down_boundaries=boundaries,
-        hatched_spots=hatched_spots if securement.straps_required else [],
+        hatched_spots=hatched if securement.straps_required else [],
         honeycomb_required=honeycomb_required,
         honeycomb_spots=honeycomb_spots,
         securement=securement,
@@ -788,16 +733,9 @@ def analyze_layout(
 
 
 # =============================
-# A/B/C mapping (placeholder)
+# A/B/C mapping placeholder
 # =============================
 def code_for_pid(pid: str, products: Dict[str, Product]) -> str:
-    """
-    Replace with your real LoadXpert SKU->A/B/C mapping.
-    Temporary:
-      - Half pack -> B
-      - T&G -> C
-      - else -> A
-    """
     p = products.get(pid)
     if not p:
         return "A"
@@ -809,7 +747,7 @@ def code_for_pid(pid: str, products: Dict[str, Product]) -> str:
 
 
 # =============================
-# Rendering (Canvas 2D + Three.js 3D)
+# Rendering (2D Canvas + optional Three.js 3D)
 # =============================
 def render_routeA_component(
     *,
@@ -823,9 +761,9 @@ def render_routeA_component(
     matrix: List[List[Optional[str]]],
     products: Dict[str, Product],
     turn_spot: int,
+    grant_mode: bool,
     airbag_gap_choice: Tuple[int, int],
     airbag_gap_in: float,
-    grant_mode: bool,
     analysis: AnalysisResult,
     code_colors: Dict[str, Dict[str, str]],
     hatch_angle_deg: float,
@@ -843,32 +781,32 @@ def render_routeA_component(
     tiers = len(matrix[0]) if matrix else 4
     blocked = blocked_spot_for_turn(turn_spot)
 
-    # Representative pid per spot (top view)
+    # Representative pid per spot (for TOP)
     rep: Dict[int, Optional[str]] = {}
     for s in range(1, FLOOR_SPOTS + 1):
         col = matrix[s - 1]
         rep[s] = next((v for v in col if v and v != BLOCK), None)
 
-    # Cell list for side + 3D
+    # Cells for SIDE + 3D
     cells = []
     for s in range(1, FLOOR_SPOTS + 1):
         for t in range(tiers):
             pid = matrix[s - 1][t]
             if pid is None or pid == BLOCK:
                 continue
-            # avoid double-paint on blocked spot for turn-span (mirror)
+            # Skip mirrored blocked spot for TURN span
             if s == blocked and matrix[turn_spot - 1][t] == pid:
                 continue
-            cells.append(
-                {
-                    "spot": s,
-                    "tier": t,
-                    "pid": pid,
-                    "code": code_for_pid(pid, products),
-                }
-            )
+            # In Grant mode, doorway bays are merged: skip second spot in bay (7 and 9)
+            if grant_mode and s in (7, 9):
+                # if it's the same pid as bay leader, skip
+                leader = 6 if s == 7 else 8
+                if matrix[leader - 1][t] == pid:
+                    continue
 
-    data = {
+            cells.append({"spot": s, "tier": t, "pid": pid, "code": code_for_pid(pid, products)})
+
+    payload = {
         "meta": {
             "page_title": page_title,
             "created_by": created_by,
@@ -883,11 +821,11 @@ def render_routeA_component(
             "door_end": DOOR_END_SPOT,
             "turn_spot": turn_spot,
             "blocked_spot": blocked,
-            "airbag_a": airbag_gap_choice[0],
-            "airbag_b": airbag_gap_choice[1],
-            "airbag_in": float(airbag_gap_in),
             "grant_mode": bool(grant_mode),
             "flip_side": bool(flip_side),
+            "airbag_a": airbag_gap_choice[0],
+            "airbag_b": airbag_gap_choice[1],
+            "airbag_in": float(airbag_in := airbag_gap_in),
             "securement_text": analysis.securement.strap_text,
             "pct_blocked": float(analysis.securement.percent_blocked),
             "hatch_legend": analysis.securement.hatch_legend,
@@ -912,9 +850,10 @@ def render_routeA_component(
             "ambient_intensity": float(ambient_intensity),
         },
     }
-    payload_json = json.dumps(data)
 
-    HTML_TEMPLATE = r"""
+    payload_json = json.dumps(payload)
+
+    HTML = r"""
 <!doctype html>
 <html>
 <head>
@@ -1059,7 +998,7 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
 
   const spots = DATA.meta.spots;
   const cellW = topW / spots;
-  const gutterFrac = 0.10; // white gutters between blocks
+  const gutterFrac = 0.10;
   const padY = 12;
   const blockH = topH - padY*2;
 
@@ -1093,19 +1032,42 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
   ctx.textAlign="center";
   ctx.fillText(`FORKLIFT TURN (${DATA.meta.turn_spot}-${DATA.meta.blocked_spot})`, tz + cellW, topY+16);
 
-  // Draw top blocks
+  // TOP drawing helper
+  function fillForSpot(spot) {
+    const pid = DATA.rep[String(spot)] || null;
+    if (!pid) return "#fff";
+    const cell = DATA.cells.find(z => z.spot === spot);
+    const code = (cell && cell.code) ? cell.code : "A";
+    return (DATA.colors[code] && DATA.colors[code].fill) ? DATA.colors[code].fill : "#fff";
+  }
+
+  // Draw TOP blocks:
+  // - Normal: each spot draws itself.
+  // - Grant: doorway draws merged bays (6–7) and (8–9) as 2-wide blocks, skip 7 and 9.
   for (let i=0;i<order.length;i++){
     const s = order[i];
+
+    // Grant mode doorway skip
+    if (DATA.meta.grant_mode && (s===7 || s===9)) continue;
+
+    const isDoor = (s >= DATA.meta.door_start && s <= DATA.meta.door_end);
+
+    // Determine span
+    let span = 1;
+    if (DATA.meta.grant_mode && isDoor) {
+      if (s===6 || s===8) span = 2;
+      else span = 1; // safety
+    }
+
     const pid = DATA.rep[String(s)] || null;
+
     const x = topX + i*cellW;
     const gx = x + cellW*gutterFrac*0.5;
-    const gw = cellW*(1 - gutterFrac);
+    const gw = cellW*(span - gutterFrac);
 
     let fill = "#fff";
     if (pid){
-      const cell = DATA.cells.find(z => z.spot === s);
-      const code = (cell && cell.code) ? cell.code : "A";
-      fill = (DATA.colors[code] && DATA.colors[code].fill) ? DATA.colors[code].fill : "#fff";
+      fill = fillForSpot(s);
     }
 
     ctx.fillStyle = fill;
@@ -1114,9 +1076,8 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
     ctx.strokeRect(gx, topY + padY, gw, blockH);
 
     if (pid){
-      // Grant mode: doorway stacks are horizontal labels (Presentation Grant method)
-      const isDoor = (s >= DATA.meta.door_start && s <= DATA.meta.door_end);
-      if (DATA.meta.grant_mode && isDoor){
+      // PDFs: doorway labels are horizontal
+      if (isDoor){
         const fs = fitNormal(ctx, pid, gw-8, blockH-8, 10, 20, "700");
         ctx.font = `700 ${fs}px Helvetica, Arial, sans-serif`;
         ctx.fillStyle="#111";
@@ -1137,7 +1098,7 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
       }
     }
 
-    // Hatch only where step-down requires cord strap (Presentation1 meaning)
+    // Hatch only where step-down requires cord strap and straps are required
     if (DATA.meta.hatched_spots.includes(s)){
       drawHatch(ctx, gx, topY + padY, gw, blockH, DATA.hatch.angle, DATA.hatch.spacing, DATA.hatch.alpha, "#000");
     }
@@ -1156,7 +1117,7 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
   const sx = sideX + sidePad;
   const sy = sideY + sidePad;
   const sw = sideW - 2*sidePad;
-  const sh = sideH - 2*sidePad - 36; // room for numbers + wheels
+  const sh = sideH - 2*sidePad - 36;
 
   const cw = sw / spots;
   const ch = sh / DATA.meta.tiers;
@@ -1172,9 +1133,11 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
   ctx.fillStyle = LX_RED2;
   ctx.fillRect(sAirX-3, sy, 6, sh);
 
-  // Blank blocked spot (gap)
   const blankSpot = DATA.meta.blocked_spot;
-  const blankIdx = order.indexOf(blankSpot);
+  const order2 = order.slice();
+
+  // Blank blocked spot band
+  const blankIdx = order2.indexOf(blankSpot);
   if (blankIdx >= 0){
     const bx = sx + blankIdx*cw;
     ctx.fillStyle="#fff";
@@ -1183,14 +1146,37 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
     ctx.strokeRect(bx, sy, cw, sh);
   }
 
-  // Grid lines + blocks
-  for (let i=0;i<order.length;i++){
-    const spot = order[i];
+  function drawCellRect(x, y, w, h, fill, pid){
+    ctx.fillStyle = fill;
+    ctx.fillRect(x+1, y+1, w-2, h-2);
+    ctx.strokeStyle="#111";
+    ctx.strokeRect(x+1, y+1, w-2, h-2);
+    const fs = fitNormal(ctx, pid, w-6, h-6, 8, 14, "700");
+    ctx.font = `700 ${fs}px Helvetica, Arial, sans-serif`;
+    ctx.fillStyle="#111";
+    ctx.textAlign="center";
+    ctx.textBaseline="middle";
+    ctx.fillText(pid, x+w/2, y+h/2);
+  }
+
+  // Draw SIDE columns
+  for (let i=0;i<order2.length;i++){
+    const spot = order2[i];
+
+    // Grant mode: skip second spot in each doorway bay
+    if (DATA.meta.grant_mode && (spot===7 || spot===9)) continue;
+
     const x = sx + i*cw;
 
+    // determine span
+    let span = 1;
+    const isDoor = (spot>=DATA.meta.door_start && spot<=DATA.meta.door_end);
+    if (DATA.meta.grant_mode && isDoor && (spot===6 || spot===8)) span = 2;
+
+    // grid outline
     ctx.strokeStyle="rgba(17,17,17,0.55)";
     ctx.lineWidth=1;
-    ctx.strokeRect(x, sy, cw, sh);
+    ctx.strokeRect(x, sy, cw*span, sh);
 
     if (spot === blankSpot) continue;
 
@@ -1198,24 +1184,12 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
       const y = sy + sh - (t+1)*ch;
       const cell = DATA.cells.find(z => z.spot === spot && z.tier === t);
       if (!cell) continue;
-
       const fill = (DATA.colors[cell.code] && DATA.colors[cell.code].fill) ? DATA.colors[cell.code].fill : "#fff";
-      ctx.fillStyle=fill;
-      ctx.fillRect(x+1, y+1, cw-2, ch-2);
-      ctx.strokeStyle="#111";
-      ctx.strokeRect(x+1, y+1, cw-2, ch-2);
-
-      const fs = fitNormal(ctx, cell.pid, cw-6, ch-6, 8, 14, "700");
-      ctx.font = `700 ${fs}px Helvetica, Arial, sans-serif`;
-      ctx.fillStyle="#111";
-      ctx.textAlign="center";
-      ctx.textBaseline="middle";
-      ctx.fillText(cell.pid, x+cw/2, y+ch/2);
+      drawCellRect(x, y, cw*span, ch, fill, cell.pid);
     }
 
-    // Hatch on entire column if that spot is flagged (cord strap for step-down)
     if (DATA.meta.hatched_spots.includes(spot)){
-      drawHatch(ctx, x+1, sy+1, cw-2, sh-2, DATA.hatch.angle, DATA.hatch.spacing, DATA.hatch.alpha, "#000");
+      drawHatch(ctx, x+1, sy+1, cw*span-2, sh-2, DATA.hatch.angle, DATA.hatch.spacing, DATA.hatch.alpha, "#000");
     }
   }
 
@@ -1223,9 +1197,15 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
   ctx.fillStyle="#111";
   ctx.font="400 12px Helvetica, Arial, sans-serif";
   ctx.textAlign="center";
-  for (let i=0;i<order.length;i++){
+  for (let i=0;i<order2.length;i++){
+    const sp = order2[i];
+    // skip numbers for 7/9 in grant mode to match merged look
+    if (DATA.meta.grant_mode && (sp===7 || sp===9)) continue;
     const x = sx + i*cw;
-    ctx.fillText(String(order[i]), x+cw/2, sy+sh+22);
+    let span = 1;
+    const isDoor = (sp>=DATA.meta.door_start && sp<=DATA.meta.door_end);
+    if (DATA.meta.grant_mode && isDoor && (sp===6 || sp===8)) span = 2;
+    ctx.fillText(String(sp), x+(cw*span)/2, sy+sh+22);
   }
 
   // Wheels
@@ -1238,7 +1218,7 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
     ctx.fill();
   }
 
-  // Footer metrics + rule text
+  // Footer metrics
   const fx=30, fy=sideY + sideH + 18, fw=W-60, fh=88;
   ctx.strokeStyle=LX_GRID; ctx.lineWidth=1.5;
   ctx.strokeRect(fx,fy,fw,fh);
@@ -1263,7 +1243,6 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
   ctx.font="400 12px Helvetica, Arial, sans-serif";
   ctx.fillText(DATA.meta.hatch_legend, fxs[3]+10, fy+42);
 
-  // Honeycomb callout
   if (DATA.meta.honeycomb_required){
     ctx.font="700 12px Helvetica, Arial, sans-serif";
     ctx.fillStyle="#111";
@@ -1272,22 +1251,12 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
 })();
 </script>
 
-<script>
-(function init3D() {
-  const threeCanvas = document.getElementById("three");
-  if (!DATA.three.enabled) {
-    threeCanvas.classList.add("hidden");
-    return;
-  }
-})();
-</script>
-
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <script>
 (function drawThree() {
-  if (!DATA.three.enabled) return;
-
   const canvas = document.getElementById('three');
+  if (!DATA.three.enabled) { canvas.classList.add("hidden"); return; }
+
   const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
   renderer.setSize(canvas.width, canvas.height, false);
 
@@ -1335,7 +1304,6 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
     const y = (c.tier + 0.5) * tierH;
     const z = 0;
 
-    // Gap column remains empty via missing cells
     const geo = new THREE.BoxGeometry(spotW*0.96, tierH*0.92, spotD*0.92);
     const mesh = new THREE.Mesh(geo, matForCode(c.code));
     mesh.position.set(x, y, z);
@@ -1349,7 +1317,6 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
     }
   }
 
-  // Frame outline
   const frameGeo = new THREE.BoxGeometry(spots*spotW*1.02, tiers*tierH*1.02 + 0.1, spotD*1.05);
   const frameEdges = new THREE.EdgesGeometry(frameGeo);
   const frame = new THREE.LineSegments(frameEdges, new THREE.LineBasicMaterial({ color: 0x0b2a7a }));
@@ -1367,12 +1334,12 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
 </body>
 </html>
 """
-    html = HTML_TEMPLATE.replace("__PAYLOAD__", payload_json)
+    html = HTML.replace("__PAYLOAD__", payload_json)
     components.html(html, height=height_px, scrolling=True)
 
 
 # =============================
-# App start
+# App init
 # =============================
 try:
     pm = load_product_master(MASTER_PATH)
@@ -1391,7 +1358,6 @@ if "matrix" not in st.session_state:
 with st.sidebar:
     st.header("Settings")
 
-    # Header fields
     page_title = st.text_input("Page title", value="Top + Side View (Route A)")
     created_by = st.text_input("Created By", value="—")
     created_at = st.text_input("Created At", value="—")
@@ -1402,33 +1368,25 @@ with st.sidebar:
 
     st.divider()
 
-    # Layout controls
     max_tiers = st.slider("Max tiers per spot", 1, 10, 4)
     turn_spot = int(st.selectbox("Turn spot (must be 7 or 8)", ["7", "8"], index=0))
     required_turn_tiers = st.slider("Turn tiers required (HARD)", 0, int(max_tiers), int(max_tiers))
 
-    # Airbag controls
-    grant_mode = st.checkbox("Grant Loading Method (doorway horizontal stacks)", value=False)
-    auto_airbag = st.checkbox('Auto airbag (prefer <= 9")', value=False)
-    if auto_airbag:
-        airbag_gap_choice, airbag_gap_in = (7, 8), 9.0
-    else:
-        gap_labels = [f"{a}-{b}" for a, b in AIRBAG_ALLOWED_GAPS]
-        gap_choice_label = st.selectbox("Airbag location", gap_labels, index=1)
-        airbag_gap_choice = AIRBAG_ALLOWED_GAPS[gap_labels.index(gap_choice_label)]
-        airbag_gap_in = st.slider("Airbag space (in)", 6.0, 12.0, 9.0, 0.5)
+    grant_mode = st.checkbox("Grant Loading Method (doorway = 2-spot bays 6–7 and 8–9)", value=True)
+
+    gap_labels = [f"{a}-{b}" for a, b in AIRBAG_ALLOWED_GAPS]
+    gap_choice_label = st.selectbox("Airbag location", gap_labels, index=1)
+    airbag_gap_choice = AIRBAG_ALLOWED_GAPS[gap_labels.index(gap_choice_label)]
+    airbag_gap_in = st.slider("Airbag space (in)", 6.0, 12.0, 9.0, 0.5)
 
     st.divider()
-
-    # Optimization weights (soft goals)
-    st.subheader("Soft goals (Presentation)")
+    st.subheader("Soft goals")
     close_top_weight = st.slider("Close-top penalty", 0, 300, 120, 10)
     weight_balance_weight = st.slider("Weight balance penalty", 0, 40, 10, 1)
     tg_safety_weight = st.slider("T&G tier safety penalty", 0, 300, 140, 10)
+    stagger_weight = st.slider("Stagger penalty (same SKU adjacent)", 0, 400, 220, 10)
 
     st.divider()
-
-    # Colors A/B/C
     st.subheader("A/B/C Colors")
     colA = st.color_picker("A fill", DEFAULT_CODE_COLORS["A"]["fill"])
     colB = st.color_picker("B fill", DEFAULT_CODE_COLORS["B"]["fill"])
@@ -1439,28 +1397,23 @@ with st.sidebar:
         "C": {"fill": colC, "stroke": "#111111"},
     }
 
-    # Hatch settings (cord-strap / step-down hatch)
     st.subheader("Hatch (cord strap / step-down)")
     hatch_angle_deg = st.slider("Hatch angle (deg)", 0.0, 90.0, float(DEFAULT_HATCH["angle_deg"]), 1.0)
     hatch_spacing_px = st.slider("Hatch spacing (px)", 4.0, 20.0, float(DEFAULT_HATCH["spacing_px"]), 1.0)
     hatch_alpha = st.slider("Hatch opacity", 0.05, 0.6, float(DEFAULT_HATCH["alpha"]), 0.01)
 
     st.divider()
-
-    # CG inputs (Presentation requires CG calc for high loading)
     st.subheader("CG_above_TOR inputs")
     A_deck = st.number_input("A: Deck height above TOR minus spring deflection (in)", min_value=0.0, value=48.0, step=0.1)
     B_empty_cg = st.number_input("B: Empty car CG above TOR (in)", min_value=0.0, value=56.0, step=0.1)
     E_tare = st.number_input("E: Tare weight (lbs)", min_value=1.0, value=75000.0, step=100.0)
-    cg_limit_in = st.number_input("CG limit above TOR (in) (warning line)", min_value=1.0, value=98.0, step=0.5)
+    cg_limit_in = st.number_input("CG limit above TOR (in)", min_value=1.0, value=98.0, step=0.5)
     override_C = st.checkbox("Override C (load CG above deck)", value=False)
-    C_override_val = None
+    C_override_val: Optional[float] = None
     if override_C:
         C_override_val = st.number_input("C: Load CG above deck (in)", min_value=0.0, value=30.0, step=0.5)
 
     st.divider()
-
-    # 3D
     st.subheader("3D view")
     show_3d = st.checkbox("Show 3D panel", value=True)
     show_edges = st.checkbox("3D edges", value=True)
@@ -1472,7 +1425,6 @@ with st.sidebar:
     ambient_intensity = st.slider("Ambient light", 0.0, 2.0, 0.65, 0.05)
 
     st.divider()
-
     flip_side = st.checkbox("Side2 (flip)", value=False)
 
     st.divider()
@@ -1512,17 +1464,8 @@ if search.strip():
         | (pm_cf[COL_DESC].astype(str).str.lower().str.contains(s) if COL_DESC in pm_cf.columns else False)
     ].copy()
 
-# stable sort
-sort_cols, ascending = [], []
-if COL_THICK in pm_cf.columns:
-    sort_cols.append(COL_THICK)
-    ascending.append(False)
-sort_cols.append(COL_PRODUCT_ID)
-ascending.append(True)
-
-pm_cf = pm_cf.sort_values(by=sort_cols, ascending=ascending, na_position="last")
+pm_cf = pm_cf.sort_values(by=[COL_PRODUCT_ID], ascending=[True], na_position="last")
 pm_cf = pm_cf.drop_duplicates(subset=[COL_PRODUCT_ID], keep="first").head(5000)
-
 options = pm_cf.to_dict("records")
 
 
@@ -1531,25 +1474,11 @@ def option_label(r: dict) -> str:
     desc = str(r.get(COL_DESC, "")).strip()
     edge = str(r.get(COL_EDGE, "")).strip()
     wt = r.get(COL_UNIT_WT)
-    thick = r.get(COL_THICK)
-    w = r.get(COL_WIDTH)
-    l = r.get(COL_LENGTH)
-
     if COL_HALF_PACK in pm_cf.columns:
         hp = " HP" if _truthy(r.get(COL_HALF_PACK, "")) else ""
     else:
         hp = " HP" if desc.upper().rstrip().endswith("HP") else ""
-
     parts = [f"{pid}{hp}"]
-    dims = []
-    if pd.notna(thick):
-        dims.append(f'{float(thick):g}"')
-    if pd.notna(w):
-        dims.append(f"{float(w):g}")
-    if pd.notna(l):
-        dims.append(f"{float(l):g}")
-    if dims:
-        parts.append(" x ".join(dims))
     if pd.notna(wt):
         parts.append(f"{float(wt):,.0f} lbs")
     if edge:
@@ -1567,10 +1496,6 @@ with c1:
     tiers_to_add = st.number_input("Tiers to add", min_value=1, value=4, step=1)
 with c2:
     add_line = st.button("Add Line", disabled=(selected_label is None))
-with c3:
-    st.write("")
-with c4:
-    st.write("")
 
 if add_line and selected_label:
     idx = labels.index(selected_label)
@@ -1590,14 +1515,7 @@ if st.session_state.requests:
     rows = []
     for r in st.session_state.requests:
         p = products.get(r.product_id)
-        rows.append(
-            {
-                "Sales Product Id": r.product_id,
-                "Description": p.description if p else "",
-                "Tiers": r.tiers,
-                "T&G?": (p.is_tg if p else False),
-            }
-        )
+        rows.append({"Sales Product Id": r.product_id, "Description": p.description if p else "", "Tiers": r.tiers, "T&G?": (p.is_tg if p else False)})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, height=240)
 else:
     st.info("Add one or more SKUs, then click Optimize Layout and Render Diagram.")
@@ -1613,38 +1531,40 @@ if optimize_btn:
             max_tiers=int(max_tiers),
             turn_spot=int(turn_spot),
             required_turn_tiers=int(required_turn_tiers),
+            grant_mode=bool(grant_mode),
             close_top_weight=int(close_top_weight),
             weight_balance_weight=int(weight_balance_weight),
             tg_safety_weight=int(tg_safety_weight),
+            stagger_weight=int(stagger_weight),
         )
         st.session_state.matrix = matrix
 
 for m in msgs:
     st.warning(m)
 
-# Always compute analysis from current matrix (so user sees rule outputs even before rendering)
 matrix = st.session_state.matrix
 analysis = analyze_layout(
     matrix=matrix,
     products=products,
     turn_spot=int(turn_spot),
-    A_deck_above_tor_minus_deflection=float(A_deck),
-    B_empty_car_cg_above_tor=float(B_empty_cg),
-    E_tare_weight=float(E_tare),
+    grant_mode=bool(grant_mode),
+    A_deck=float(A_deck),
+    B_empty_cg=float(B_empty_cg),
+    E_tare=float(E_tare),
     cg_limit_in=float(cg_limit_in),
-    override_C_load_cg_above_deck=(float(C_override_val) if C_override_val is not None else None),
+    override_C=(float(C_override_val) if C_override_val is not None else None),
 )
 
 st.subheader("Rule Outputs (Presentation1)")
 
-cA, cB, cC, cD = st.columns(4)
-with cA:
+a1, a2, a3, a4 = st.columns(4)
+with a1:
     st.metric("% Blocked (proxy)", f"{analysis.securement.percent_blocked:.1f}%")
-with cB:
+with a2:
     st.metric("Securement", analysis.securement.strap_text)
-with cC:
+with a3:
     st.metric("CG above TOR (in)", f"{analysis.cg_above_tor_in:.2f} ({analysis.cg_status})")
-with cD:
+with a4:
     st.metric("Weight balance", f"{analysis.weight_balance_ratio*100:.1f}%")
 
 if analysis.hatched_spots:
@@ -1668,9 +1588,9 @@ if render_btn:
         matrix=matrix,
         products=products,
         turn_spot=int(turn_spot),
+        grant_mode=bool(grant_mode),
         airbag_gap_choice=airbag_gap_choice,
         airbag_gap_in=float(airbag_gap_in),
-        grant_mode=bool(grant_mode),
         analysis=analysis,
         code_colors=code_colors,
         hatch_angle_deg=float(hatch_angle_deg),
