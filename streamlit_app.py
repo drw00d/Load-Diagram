@@ -1381,10 +1381,10 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Soft goals")
-    close_top_weight = st.slider("Close-top penalty", 0, 300, 120, 10)
-    weight_balance_weight = st.slider("Weight balance penalty", 0, 40, 10, 1)
-    tg_safety_weight = st.slider("T&G tier safety penalty", 0, 300, 140, 10)
-    stagger_weight = st.slider("Stagger penalty (same SKU adjacent)", 0, 400, 220, 10)
+    close_top_weight = 0
+    weight_balance_weight = 0
+    tg_safety_weight = 0
+    stagger_weight = 0
 
     st.divider()
     st.subheader("A/B/C Colors")
