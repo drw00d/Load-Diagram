@@ -1397,10 +1397,9 @@ with st.sidebar:
         "C": {"fill": colC, "stroke": "#111111"},
     }
 
-    st.subheader("Hatch (cord strap / step-down)")
-    hatch_angle_deg = st.slider("Hatch angle (deg)", 0.0, 90.0, float(DEFAULT_HATCH["angle_deg"]), 1.0)
-    hatch_spacing_px = st.slider("Hatch spacing (px)", 4.0, 20.0, float(DEFAULT_HATCH["spacing_px"]), 1.0)
-    hatch_alpha = st.slider("Hatch opacity", 0.05, 0.6, float(DEFAULT_HATCH["alpha"]), 0.01)
+    hatch_angle_deg = float(DEFAULT_HATCH["angle_deg"])
+    hatch_spacing_px = float(DEFAULT_HATCH["spacing_px"])
+    hatch_alpha = float(DEFAULT_HATCH["alpha"])
 
     st.divider()
     st.subheader("CG_above_TOR inputs")
