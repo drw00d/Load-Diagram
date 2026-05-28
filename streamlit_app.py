@@ -29,8 +29,8 @@ import streamlit.components.v1 as components
 # =============================
 # Page
 # =============================
-st.set_page_config(page_title="Load Diagram Optimizer — Route A", layout="wide")
-st.title("Load Diagram Optimizer — Route A")
+st.set_page_config(page_title="Load Diagram Optimizer", layout="wide")
+st.title("Load Diagram Optimizer")
 
 MASTER_PATH = "data/Ortec SP Product Master.xlsx"
 
