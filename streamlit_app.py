@@ -1360,19 +1360,16 @@ with st.sidebar:
     if override_C:
         C_override_val = st.number_input("C: Load CG above deck (in)", min_value=0.0, value=30.0, step=0.5)
 
-    st.divider()
-    st.subheader("3D view")
-    show_3d = st.checkbox("Show 3D panel", value=True)
-    show_edges = st.checkbox("3D edges", value=True)
-    cam_fov = st.slider("Camera FOV", 20.0, 75.0, 42.0, 1.0)
-    cam_x = st.slider("Cam X", -40.0, 40.0, 10.0, 0.5)
-    cam_y = st.slider("Cam Y", 0.0, 40.0, 10.0, 0.5)
-    cam_z = st.slider("Cam Z", -60.0, 60.0, 18.0, 0.5)
-    light_intensity = st.slider("Directional light", 0.2, 3.0, 1.2, 0.1)
-    ambient_intensity = st.slider("Ambient light", 0.0, 2.0, 0.65, 0.05)
-
-    st.divider()
-    flip_side = st.checkbox("Side2 (flip)", value=False)
+    # 3D view: always shown with sensible defaults; multiple sides + top are always visible.
+    show_3d = True
+    show_edges = True
+    cam_fov = 42.0
+    cam_x = 10.0
+    cam_y = 10.0
+    cam_z = 18.0
+    light_intensity = 1.2
+    ambient_intensity = 0.65
+    flip_side = False
 
     st.divider()
     optimize_btn = st.button("Optimize Layout")
