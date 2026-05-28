@@ -1,9 +1,8 @@
 # streamlit_app.py
-# LoadXpert Route A — Presentation1 Rules Integrated (Grant doorway = 2-spot bays)
+# LoadXpert Route A — Presentation1 Rules Integrated
 #
 # Key behaviors:
 # - NORMAL doorway: 6/7/8/9 are independent 1-spot columns (but TOP labels in doorway render horizontal like PDF).
-# - GRANT doorway: two horizontal bays per tier: (6–7) and (8–9). Each placement consumes 2 spots.
 # - Forklift TURN: consumes 2 spots at turn_spot and turn_spot+1 for required tiers (hard).
 # - Presentation1 rules:
 #   * %Blocked -> Strapping requirement text
@@ -31,7 +30,7 @@ import streamlit.components.v1 as components
 # Page
 # =============================
 st.set_page_config(page_title="Load Diagram Optimizer — Route A", layout="wide")
-st.title("Load Diagram Optimizer — Route A (Grant doorway = 2-spot bays)")
+st.title("Load Diagram Optimizer — Route A")
 
 MASTER_PATH = "data/Ortec SP Product Master.xlsx"
 
@@ -63,7 +62,6 @@ FLOOR_SPOTS = 15
 DOOR_START_SPOT = 6
 DOOR_END_SPOT = 9
 DOOR_SPOTS = [6, 7, 8, 9]
-DOOR_BAYS_GRANT = [(6, 7), (8, 9)]  # Grant method: 2 bays only
 
 DOORFRAME_NO_ME = {6, 9}
 DOORPOCKET_PINS = {7, 8}
@@ -226,17 +224,10 @@ def is_blocked_spot(spot: int, turn_spot: int) -> bool:
     return spot == blocked_spot_for_turn(turn_spot)
 
 
-def occupied_spots_for_placement(spot: int, turn_spot: int, grant_mode: bool) -> List[int]:
+def occupied_spots_for_placement(spot: int, turn_spot: int) -> List[int]:
     # Forklift turn consumes 2 spots always
     if spot == turn_spot:
         return [spot, blocked_spot_for_turn(turn_spot)]
-
-    # Grant method: doorway placements consume 2 spots (bay)
-    if grant_mode and spot in DOOR_SPOTS:
-        if spot in (6, 7):
-            return [6, 7]
-        if spot in (8, 9):
-            return [8, 9]
 
     # Normal: 1 spot
     return [spot]
@@ -255,11 +246,11 @@ def make_empty_matrix(max_tiers: int, turn_spot: int) -> List[List[Optional[str]
 
 
 def next_empty_tier_index(
-    matrix: List[List[Optional[str]]], spot: int, turn_spot: int, grant_mode: bool
+    matrix: List[List[Optional[str]]], spot: int, turn_spot: int
 ) -> Optional[int]:
     if is_blocked_spot(spot, turn_spot):
         return None
-    occ = occupied_spots_for_placement(spot, turn_spot, grant_mode)
+    occ = occupied_spots_for_placement(spot, turn_spot)
     tiers = len(matrix[0])
     for t in range(tiers):
         if all(matrix[s - 1][t] is None for s in occ):
@@ -268,18 +259,18 @@ def next_empty_tier_index(
 
 
 def place_pid(
-    matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: str, turn_spot: int, grant_mode: bool
+    matrix: List[List[Optional[str]]], spot: int, tier_idx: int, pid: str, turn_spot: int
 ) -> None:
-    for s in occupied_spots_for_placement(spot, turn_spot, grant_mode):
+    for s in occupied_spots_for_placement(spot, turn_spot):
         matrix[s - 1][tier_idx] = pid
 
 
 # =============================
 # Hard + Soft rules
 # =============================
-def can_place_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot: int, grant_mode: bool) -> Tuple[bool, str]:
+def can_place_hard(products: Dict[str, Product], pid: str, spot: int, turn_spot: int) -> Tuple[bool, str]:
     p = products[pid]
-    occ = occupied_spots_for_placement(spot, turn_spot, grant_mode)
+    occ = occupied_spots_for_placement(spot, turn_spot)
 
     if p.is_machine_edge and any(s in DOORFRAME_NO_ME for s in occ):
         return False, "Machine Edge not allowed in doorframe spots 6/9 (or any placement that touches them)."
@@ -376,7 +367,6 @@ def pop_best(
     max_tiers: int,
     matrix: List[List[Optional[str]]],
     turn_spot: int,
-    grant_mode: bool,
     close_top_weight: int,
     weight_balance_weight: int,
     tg_safety_weight: int,
@@ -385,7 +375,7 @@ def pop_best(
     best_i = None
     best_score = None
     for i, pid in enumerate(tokens):
-        ok, _ = can_place_hard(products, pid, spot, turn_spot, grant_mode)
+        ok, _ = can_place_hard(products, pid, spot, turn_spot)
         if not ok:
             continue
         score = soft_penalty(
@@ -417,7 +407,6 @@ def force_turn_tiers(
     max_tiers: int,
     turn_spot: int,
     required_turn_tiers: int,
-    grant_mode: bool,
     msgs: List[str],
     close_top_weight: int,
     weight_balance_weight: int,
@@ -436,7 +425,6 @@ def force_turn_tiers(
             max_tiers=max_tiers,
             matrix=matrix,
             turn_spot=turn_spot,
-            grant_mode=grant_mode,
             close_top_weight=close_top_weight,
             weight_balance_weight=weight_balance_weight,
             tg_safety_weight=tg_safety_weight,
@@ -445,7 +433,7 @@ def force_turn_tiers(
         if pid is None:
             msgs.append(f"TURN HARD RULE: could not place a legal tier into TURN spot at Tier {t+1}.")
             return
-        place_pid(matrix, turn_spot, t, pid, turn_spot, grant_mode)
+        place_pid(matrix, turn_spot, t, pid, turn_spot)
 
 
 def optimize_layout(
@@ -454,7 +442,6 @@ def optimize_layout(
     max_tiers: int,
     turn_spot: int,
     required_turn_tiers: int,
-    grant_mode: bool,
     close_top_weight: int,
     weight_balance_weight: int,
     tg_safety_weight: int,
@@ -471,7 +458,6 @@ def optimize_layout(
         max_tiers,
         turn_spot,
         required_turn_tiers,
-        grant_mode,
         msgs,
         close_top_weight,
         weight_balance_weight,
@@ -480,18 +466,14 @@ def optimize_layout(
     )
 
     outside = [1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]
-    if grant_mode:
-        # only bay-representatives; each consumes 2 spots
-        doorway = [6, 8]
-    else:
-        doorway = [7, 8, 6, 9]
+    doorway = [7, 8, 6, 9]
 
     order = [s for s in outside + doorway if not is_blocked_spot(s, turn_spot)]
 
     while tokens:
         placed_any = False
         for spot in order:
-            t = next_empty_tier_index(matrix, spot, turn_spot, grant_mode)
+            t = next_empty_tier_index(matrix, spot, turn_spot)
             if t is None:
                 continue
 
@@ -503,7 +485,6 @@ def optimize_layout(
                 max_tiers=max_tiers,
                 matrix=matrix,
                 turn_spot=turn_spot,
-                grant_mode=grant_mode,
                 close_top_weight=close_top_weight,
                 weight_balance_weight=weight_balance_weight,
                 tg_safety_weight=tg_safety_weight,
@@ -517,19 +498,19 @@ def optimize_layout(
                 for pin_spot in [7, 8]:
                     if is_blocked_spot(pin_spot, turn_spot):
                         continue
-                    tpin = next_empty_tier_index(matrix, pin_spot, turn_spot, grant_mode)
+                    tpin = next_empty_tier_index(matrix, pin_spot, turn_spot)
                     if tpin == t:
-                        ok, _ = can_place_hard(products, pid, pin_spot, turn_spot, grant_mode)
+                        ok, _ = can_place_hard(products, pid, pin_spot, turn_spot)
                         if ok:
                             spot = pin_spot
                             break
 
-            ok, why = can_place_hard(products, pid, spot, turn_spot, grant_mode)
+            ok, why = can_place_hard(products, pid, spot, turn_spot)
             if not ok:
                 msgs.append(f"Skipped {pid} at spot {spot}, tier {t+1}: {why}")
                 continue
 
-            place_pid(matrix, spot, t, pid, turn_spot, grant_mode)
+            place_pid(matrix, spot, t, pid, turn_spot)
             placed_any = True
 
         if not placed_any:
@@ -558,7 +539,7 @@ def decide_strapping(percent_blocked: float) -> SecurementDecision:
 # =============================
 # Analysis: step-down, voids, %blocked, CG
 # =============================
-def compute_spot_heights(matrix: List[List[Optional[str]]], turn_spot: int, grant_mode: bool) -> Dict[int, int]:
+def compute_spot_heights(matrix: List[List[Optional[str]]], turn_spot: int) -> Dict[int, int]:
     heights: Dict[int, int] = {}
     blocked = blocked_spot_for_turn(turn_spot)
 
@@ -570,14 +551,6 @@ def compute_spot_heights(matrix: List[List[Optional[str]]], turn_spot: int, gran
     # Turn span mirror
     if 1 <= blocked <= FLOOR_SPOTS:
         heights[blocked] = heights.get(turn_spot, 0)
-
-    # Grant bays should be equalized within each bay (6–7 and 8–9)
-    if grant_mode:
-        for a, b in DOOR_BAYS_GRANT:
-            ha, hb = heights.get(a, 0), heights.get(b, 0)
-            m = max(ha, hb)
-            heights[a] = m
-            heights[b] = m
 
     return heights
 
@@ -694,14 +667,13 @@ def analyze_layout(
     matrix: List[List[Optional[str]]],
     products: Dict[str, Product],
     turn_spot: int,
-    grant_mode: bool,
     A_deck: float,
     B_empty_cg: float,
     E_tare: float,
     cg_limit_in: float,
     override_C: Optional[float],
 ) -> AnalysisResult:
-    heights = compute_spot_heights(matrix, turn_spot, grant_mode)
+    heights = compute_spot_heights(matrix, turn_spot)
     boundaries = detect_step_down_boundaries(heights)
     hatched = determine_hatched_spots_from_step_down(boundaries, heights)
 
@@ -761,7 +733,6 @@ def render_routeA_component(
     matrix: List[List[Optional[str]]],
     products: Dict[str, Product],
     turn_spot: int,
-    grant_mode: bool,
     airbag_gap_choice: Tuple[int, int],
     airbag_gap_in: float,
     analysis: AnalysisResult,
@@ -797,13 +768,6 @@ def render_routeA_component(
             # Skip mirrored blocked spot for TURN span
             if s == blocked and matrix[turn_spot - 1][t] == pid:
                 continue
-            # In Grant mode, doorway bays are merged: skip second spot in bay (7 and 9)
-            if grant_mode and s in (7, 9):
-                # if it's the same pid as bay leader, skip
-                leader = 6 if s == 7 else 8
-                if matrix[leader - 1][t] == pid:
-                    continue
-
             cells.append({"spot": s, "tier": t, "pid": pid, "code": code_for_pid(pid, products)})
 
     payload = {
@@ -821,7 +785,6 @@ def render_routeA_component(
             "door_end": DOOR_END_SPOT,
             "turn_spot": turn_spot,
             "blocked_spot": blocked,
-            "grant_mode": bool(grant_mode),
             "flip_side": bool(flip_side),
             "airbag_a": airbag_gap_choice[0],
             "airbag_b": airbag_gap_choice[1],
@@ -1043,21 +1006,14 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
 
   // Draw TOP blocks:
   // - Normal: each spot draws itself.
-  // - Grant: doorway draws merged bays (6–7) and (8–9) as 2-wide blocks, skip 7 and 9.
   for (let i=0;i<order.length;i++){
     const s = order[i];
 
-    // Grant mode doorway skip
-    if (DATA.meta.grant_mode && (s===7 || s===9)) continue;
 
     const isDoor = (s >= DATA.meta.door_start && s <= DATA.meta.door_end);
 
     // Determine span
     let span = 1;
-    if (DATA.meta.grant_mode && isDoor) {
-      if (s===6 || s===8) span = 2;
-      else span = 1; // safety
-    }
 
     const pid = DATA.rep[String(s)] || null;
 
@@ -1163,15 +1119,12 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
   for (let i=0;i<order2.length;i++){
     const spot = order2[i];
 
-    // Grant mode: skip second spot in each doorway bay
-    if (DATA.meta.grant_mode && (spot===7 || spot===9)) continue;
 
     const x = sx + i*cw;
 
     // determine span
     let span = 1;
     const isDoor = (spot>=DATA.meta.door_start && spot<=DATA.meta.door_end);
-    if (DATA.meta.grant_mode && isDoor && (spot===6 || spot===8)) span = 2;
 
     // grid outline
     ctx.strokeStyle="rgba(17,17,17,0.55)";
@@ -1199,12 +1152,9 @@ function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
   ctx.textAlign="center";
   for (let i=0;i<order2.length;i++){
     const sp = order2[i];
-    // skip numbers for 7/9 in grant mode to match merged look
-    if (DATA.meta.grant_mode && (sp===7 || sp===9)) continue;
     const x = sx + i*cw;
     let span = 1;
     const isDoor = (sp>=DATA.meta.door_start && sp<=DATA.meta.door_end);
-    if (DATA.meta.grant_mode && isDoor && (sp===6 || sp===8)) span = 2;
     ctx.fillText(String(sp), x+(cw*span)/2, sy+sh+22);
   }
 
@@ -1372,8 +1322,6 @@ with st.sidebar:
     turn_spot = int(st.selectbox("Turn spot (must be 7 or 8)", ["7", "8"], index=0))
     required_turn_tiers = st.slider("Turn tiers required (HARD)", 0, int(max_tiers), int(max_tiers))
 
-    grant_mode = st.checkbox("Grant Loading Method (doorway = 2-spot bays 6–7 and 8–9)", value=True)
-
     gap_labels = [f"{a}-{b}" for a, b in AIRBAG_ALLOWED_GAPS]
     gap_choice_label = st.selectbox("Airbag location", gap_labels, index=1)
     airbag_gap_choice = AIRBAG_ALLOWED_GAPS[gap_labels.index(gap_choice_label)]
@@ -1530,7 +1478,6 @@ if optimize_btn:
             max_tiers=int(max_tiers),
             turn_spot=int(turn_spot),
             required_turn_tiers=int(required_turn_tiers),
-            grant_mode=bool(grant_mode),
             close_top_weight=int(close_top_weight),
             weight_balance_weight=int(weight_balance_weight),
             tg_safety_weight=int(tg_safety_weight),
@@ -1546,7 +1493,6 @@ analysis = analyze_layout(
     matrix=matrix,
     products=products,
     turn_spot=int(turn_spot),
-    grant_mode=bool(grant_mode),
     A_deck=float(A_deck),
     B_empty_cg=float(B_empty_cg),
     E_tare=float(E_tare),
@@ -1587,7 +1533,6 @@ if render_btn:
         matrix=matrix,
         products=products,
         turn_spot=int(turn_spot),
-        grant_mode=bool(grant_mode),
         airbag_gap_choice=airbag_gap_choice,
         airbag_gap_in=float(airbag_gap_in),
         analysis=analysis,
