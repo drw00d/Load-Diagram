@@ -856,359 +856,224 @@ def render_routeA_component(
     payload_json = json.dumps(payload)
 
     HTML = r"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <style>
-  * { box-sizing: border-box; }
-  html,body { margin:0; padding:0; background:#ffffff; font-family: Arial, Helvetica, sans-serif; color:#222; }
-  .root { width:100%; padding:8px 10px 14px 10px; }
-  .hdrstrip { display:flex; justify-content:space-between; align-items:center; gap:18px;
-    font-size:13px; padding:6px 4px; border-bottom:1px solid #cfcfcf; margin-bottom:6px; }
-  .hdrstrip .lab { color:#222; }
-  .hdrstrip .val { color:#1f6fb2; font-weight:bold; }
-  .layout { display:flex; gap:10px; align-items:stretch; }
-  .leftcol { width:32%; min-width:290px; }
-  .rightcol { flex:1; display:flex; flex-direction:column; gap:8px; }
-  .panel { border:1px solid #d0d0d0; border-radius:4px; padding:8px 10px; margin-bottom:10px; }
-  .panel h3 { margin:0 0 8px 0; font-size:15px; font-weight:bold; }
-  table.settings { width:100%; border-collapse:collapse; font-size:12.5px; }
-  table.settings td { border:1px solid #d8d8d8; padding:5px 8px; }
-  table.settings td.k { background:#f3f3f3; width:42%; color:#333; }
-  .viewbox { border:1px solid #e2e2e2; border-radius:4px; padding:4px; }
-  .viewtitle { text-align:center; font-size:15px; font-weight:bold; margin:2px 0 4px 0; }
-  canvas { display:block; width:100%; }
-  .footer { border-top:1px solid #c9c9c9; margin-top:8px; padding-top:6px; font-size:12.5px; }
-  .footrow { display:flex; justify-content:space-between; gap:14px; padding:2px 4px; }
-  .footrow .cell { white-space:nowrap; }
-  .footrow b { font-weight:bold; }
-  .legend { display:flex; gap:30px; font-size:11px; color:#1f7a1f; margin-top:6px; align-items:flex-start; }
-  .legend .lg { display:flex; gap:6px; align-items:flex-start; max-width:32%; }
-  table.items { width:100%; border-collapse:collapse; font-size:12px; margin-top:6px; }
-  table.items td, table.items th { border:1px solid #cfcfcf; padding:3px 6px; text-align:left; }
-  table.items td.k { background:#f3f3f3; font-weight:bold; width:20%; }
-  .swatch { display:inline-block; width:34px; height:14px; vertical-align:middle; }
-</style>
-</head>
-<body>
-<div class="root">
-
-  <div class="hdrstrip">
-    <div><span class="lab">Payload : </span><span class="val" id="h_payload"></span></div>
-    <div><span class="lab">MaxPayload : </span><span class="val" id="h_maxpay"></span></div>
-    <div><span class="lab">Volume % : </span><span class="val" id="h_vol"></span></div>
-    <div><span class="lab">Weight % : </span><span class="val" id="h_wt"></span></div>
+*{box-sizing:border-box;}
+body{font-family:Arial,Helvetica,sans-serif;margin:0;padding:8px;color:#111;background:#fff;}
+.hdr{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #1f3b73;padding-bottom:4px;margin-bottom:6px;}
+.hdr .title{font-size:18px;font-weight:bold;color:#1f3b73;}
+.hdr .meta{font-size:11px;text-align:right;color:#333;}
+.statbar{display:flex;gap:24px;font-size:12px;margin:4px 0 8px;color:#1f3b73;font-weight:bold;}
+.statbar span b{color:#1f3b73;}
+.layout{display:flex;gap:10px;}
+.col-left{width:320px;flex:0 0 320px;}
+.col-right{flex:1;}
+table.grid{border-collapse:collapse;width:100%;font-size:11px;margin-bottom:8px;}
+table.grid th,table.grid td{border:1px solid #888;padding:3px 5px;text-align:left;}
+table.grid th{background:#eef1f7;}
+.viewbox{border:1px solid #ccc;margin-bottom:8px;padding:4px;}
+.viewtitle{text-align:center;font-weight:bold;font-size:13px;margin:2px 0;}
+canvas{display:block;width:100%;}
+#three{width:100%;height:300px;}
+.footer{border-top:2px solid #1f3b73;margin-top:6px;padding-top:4px;font-size:12px;}
+.footrow{display:flex;justify-content:space-between;margin:2px 0;}
+.legend{font-size:10px;color:#444;margin-top:4px;}
+</style></head><body>
+<div class="hdr">
+  <div class="title" id="h_title"></div>
+  <div class="meta" id="h_meta"></div>
+</div>
+<div class="statbar">
+  <span>Payload : <b id="h_payload"></b></span>
+  <span>MaxPayload : <b id="h_maxpay"></b></span>
+  <span>Volume % : <b id="h_vol"></b></span>
+  <span>Weight % : <b id="h_wt"></b></span>
+</div>
+<div class="layout">
+  <div class="col-left">
+    <table class="grid" id="tbl_settings"></table>
+    <table class="grid" id="tbl_lines"></table>
   </div>
-
-  <div class="layout">
-    <div class="leftcol">
-      <div class="panel">
-        <h3>Optimization Settings :</h3>
-        <table class="settings" id="tbl_settings"></table>
-      </div>
-      <div class="panel">
-        <table class="items" id="tbl_lines"></table>
-      </div>
-    </div>
-
-    <div class="rightcol">
-      <div class="viewbox">
-        <div class="viewtitle">3D</div>
-        <div id="three" style="width:100%;height:300px;"></div>
-      </div>
-      <div class="viewbox">
-        <div class="viewtitle">Top</div>
-        <canvas id="cvTop" width="1100" height="170"></canvas>
-      </div>
-      <div class="viewbox">
-        <div class="viewtitle">Side1</div>
-        <canvas id="cvSide" width="1100" height="240"></canvas>
-      </div>
-    </div>
-  </div>
-
-  <div class="footer">
-    <div class="footrow">
-      <div class="cell">Floor spots&nbsp; = <b id="f_spots"></b></div>
-      <div class="cell">C.G. height&nbsp; = <b id="f_cg"></b> (in)</div>
-      <div class="cell">Airbag Space&nbsp; = <b id="f_airbag"></b> (in)</div>
-      <div class="cell">Whole Unit Equivalent&nbsp; = <b id="f_wue"></b></div>
-    </div>
-    <div class="footrow">
-      <div class="cell">Secure Loads from:&nbsp; <span class="swatch" id="sw_diag"></span> sliding&nbsp;&nbsp; <span class="swatch" id="sw_vert"></span> tipping &amp; sliding</div>
-      <div class="cell">Total LISA Units&nbsp; = <b id="f_lisa"></b></div>
-    </div>
-    <table class="items" id="tbl_items"></table>
-    <div class="legend" id="legend"></div>
+  <div class="col-right">
+    <div class="viewbox"><div class="viewtitle">3D</div><div id="three"></div></div>
+    <div class="viewbox"><div class="viewtitle">Top</div><canvas id="cvTop" width="1100" height="170"></canvas></div>
+    <div class="viewbox"><div class="viewtitle">Side1</div><canvas id="cvSide" width="1100" height="240"></canvas></div>
   </div>
 </div>
-
-<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<div class="footer">
+  <div class="footrow"><span>Floor spots = <b id="f_spots"></b></span><span>C.G. height = <b id="f_cg"></b></span><span>Airbag Space = <b id="f_airbag"></b></span><span>Whole Unit Equivalent = <b id="f_wue"></b></span></div>
+  <div class="footrow"><span>Secure Loads from: <span id="sw_diag"></span> sliding &nbsp; <span id="sw_vert"></span> tipping &amp; sliding</span><span>Total LISA Units = <b id="f_lisa"></b></span></div>
+  <table class="grid" id="tbl_items"></table>
+  <div class="legend" id="legend"></div>
+</div>
 <script>
 (function(){
-
-  var P = __PAYLOAD__;
-  var meta = P.meta || {};
-  var colors = P.colors || {};
-  var cells = P.cells || [];
-  var items = P.items || [];
-  var SPOTS = meta.spots || 15;
-  var TIERS = meta.tiers || 4;
-  var turn = meta.turn_spot || 0;
-  var blocked = meta.blocked_spot || 0;
-  var doorStart = meta.door_start || 6;
-  var doorEnd = meta.door_end || 9;
-
-  function fmt(n){ try { return Math.round(n).toLocaleString('en-US'); } catch(e){ return ''+n; } }
-  function f2(n){ return (Math.round(n*100)/100).toFixed(2); }
-  function f1(n){ return (Math.round(n*10)/10).toFixed(1); }
-  function setTxt(id,v){ var el=document.getElementById(id); if(el) el.textContent=v; }
-  function colFor(code){ var c=colors[code]||colors['A']||{}; return {fill:c.fill||'#7fd4cf', stroke:c.stroke||'#2b8e88', text:c.text||'#06403d'}; }
-
-  setTxt('h_payload', fmt(meta.payload_lbs||0));
-  setTxt('h_maxpay', fmt(meta.max_payload_lbs||0));
-  setTxt('h_vol', Math.round(meta.volume_pct||0));
-  setTxt('h_wt', Math.round(meta.weight_pct||0));
-
-  var st = document.getElementById('tbl_settings');
-  var ini = (meta.car_id||'').match(/^[A-Za-z]+/);
-  var carno = (meta.car_id||'').replace(/^[A-Za-z]+/,'');
-  var setRows = [
-    ['Jurisdiction', '286 000'],
-    ['Securement', 'Plywood'],
-    ['Vehicle', '60 ft Plate F'],
-    ['Umler Initial', ini? ini[0] : '\u2014'],
-    ['Umler Car #', carno || '\u2014']
-  ];
-  setRows.forEach(function(r){
-    var tr=document.createElement('tr');
-    tr.innerHTML='<td class="k">'+r[0]+'</td><td>'+r[1]+'</td>';
-    st.appendChild(tr);
-  });
-
-  setTxt('f_spots', meta.used_spots || SPOTS);
-  setTxt('f_cg', f2(meta.cg_in||0));
-  setTxt('f_airbag', f2(meta.airbag_in||0));
-  setTxt('f_wue', f1(meta.total_units||0));
-  setTxt('f_lisa', f1(meta.total_units||0));
-
-  var lt = document.getElementById('tbl_lines');
-  var hdr=document.createElement('tr');
-  hdr.innerHTML='<th>#</th><th>Description</th><th>Qty</th><th>Wt (Unit Wt.)</th>';
-  lt.appendChild(hdr);
-  items.forEach(function(it,i){
-    var tr=document.createElement('tr');
-    var tot = (it.wt? it.wt*it.qty : 0);
-    tr.innerHTML='<td>'+(i+1)+'</td>'+
-      '<td><b>Product: ['+it.id+']</b><br>'+(it.name||'')+'</td>'+
-      '<td>'+it.qty+'</td>'+
-      '<td><b>'+fmt(tot)+'</b><br>('+fmt(it.wt||0)+')</td>';
-    lt.appendChild(tr);
-  });
-
-  var firstCode = (items[0]&&items[0].code)||'A';
-  var cd = colFor(firstCode);
-  var totalUnits = meta.total_units||0;
-  var it0 = items[0]||{};
-  var sz = (it0.L!=null&&it0.W!=null&&it0.H!=null) ? (f2(it0.L)+'x'+f2(it0.W)+'x'+f2(it0.H)) : '';
-  var itbl=document.getElementById('tbl_items');
-  function irow(k,v,swatch){
-    var tr=document.createElement('tr');
-    var vc = swatch ? '<td><span class="swatch" style="background:'+cd.fill+';border:1px solid '+cd.stroke+'"></span></td><td>'+v+'</td>' : '<td colspan="2">'+v+'</td>';
-    tr.innerHTML='<td class="k">'+k+'</td>'+vc;
-    itbl.appendChild(tr);
-  }
-  irow('ITEM ('+totalUnits+')', totalUnits, true);
-  irow('Name/SKU', it0.name||'');
-  irow('Product Id', it0.id||'');
-  irow('Size (LxWxH) (in)', sz);
-  irow('Weight (lb)', fmt(it0.wt||0));
-
-  var lg=document.getElementById('legend');
-  lg.innerHTML =
-    '<div class="lg"><span class="swatch" style="background:repeating-linear-gradient(45deg,#1f7a1f 0 2px,#fff 2px 5px);border:1px solid #1f7a1f"></span> Diagonally hatched Loads must be restrained from sliding</div>'+
-    '<div class="lg"><span class="swatch" style="background:repeating-linear-gradient(90deg,#1f7a1f 0 2px,#fff 2px 5px);border:1px solid #1f7a1f"></span> Vertically hatched Loads must be restrained from tipping and sliding</div>'+
-    '<div class="lg">Any securement system used must prevent movement of all Loads blocked by the hatched Load</div>';
-  var sd=document.getElementById('sw_diag'); if(sd){ sd.style.background='repeating-linear-gradient(45deg,#888 0 2px,#fff 2px 5px)'; sd.style.border='1px solid #888'; }
-  var sv=document.getElementById('sw_vert'); if(sv){ sv.style.background='repeating-linear-gradient(90deg,#888 0 2px,#fff 2px 5px)'; sv.style.border='1px solid #888'; }
-
-  // Build grid[spot][tier] = {pid,code} ; spot 1..SPOTS, tier 0..TIERS-1 (0 = bottom)
-  var grid = {};
-  for (var sp=1; sp<=SPOTS; sp++){ grid[sp]=[]; for(var t=0;t<TIERS;t++) grid[sp][t]=null; }
-  cells.forEach(function(c){ if(grid[c.spot]) grid[c.spot][c.tier]={pid:c.pid, code:c.code}; });
-
-  // Turn column = the spot flagged as turn. Its adjacent blocked spot is part of the same
-  // rotated unit (the turn unit spans turn_spot and blocked_spot). We render the rotated
-  // units in the turn column only and skip the blocked spot (it is the same physical unit).
-  function isTurn(sp){ return sp===turn; }
-  function isBlocked(sp){ return sp===blocked; }
-  function occupied(sp,t){ return !!(grid[sp] && grid[sp][t]); }
-
-  // Determine left-of-door and right-of-door spot lists (visual order left->right).
-  var leftSpots=[], rightSpots=[];
-  for(var sp=1; sp<=SPOTS; sp++){
-    if(isBlocked(sp)) continue;       // merged into turn column visually
-    if(isTurn(sp)) continue;          // handled separately
-    if(sp < turn) leftSpots.push(sp); else rightSpots.push(sp);
-  }
-
-  // Snaking numbering:
-  //  - Left side: number each occupied unit, walking spots L->R, tiers bottom->top.
-  //  - Turn column: number its rotated units bottom->top (suffix 'r').
-  //  - Right side: continue numbering but walk spots RIGHT->LEFT (so right half counts down
-  //    visually L->R, matching LoadXpert where the right block reads 60,56,...,36).
-  var labels = {};
-  for(var sp=1; sp<=SPOTS; sp++){ labels[sp]=[]; for(var t=0;t<TIERS;t++) labels[sp][t]=null; }
-  var seq=1;
-  leftSpots.forEach(function(sp){
-    for(var t=0;t<TIERS;t++){ if(occupied(sp,t)){ labels[sp][t]={n:seq++, code:grid[sp][t].code, rot:false}; } }
-  });
-  // turn column
-  for(var t=0;t<TIERS;t++){ if(occupied(turn,t)){ labels[turn][t]={n:seq++, code:grid[turn][t].code, rot:true}; } }
-  // right side, walk right->left
-  var rightRev = rightSpots.slice().reverse();
-  rightRev.forEach(function(sp){
-    for(var t=0;t<TIERS;t++){ if(occupied(sp,t)){ labels[sp][t]={n:seq++, code:grid[sp][t].code, rot:false}; } }
-  });
-
-  function labText(sp,t){ var l=labels[sp]&&labels[sp][t]; if(!l) return null; return l.n + (l.rot?'r':'') + ' ' + l.code; }
-  function topOccTier(sp){ for(var t=TIERS-1;t>=0;t--){ if(occupied(sp,t)) return t; } return -1; }
-
-  function drawTop(){
-    var cv=document.getElementById('cvTop'); if(!cv) return;
-    var W=cv.width, H=cv.height; var ctx=cv.getContext('2d');
-    ctx.clearRect(0,0,W,H);
-    var padL=12, padR=12, padT=18, padB=14;
-    var innerW=W-padL-padR, innerH=H-padT-padB;
-    // total visual columns = leftSpots + 1 (turn) + rightSpots
-    var nCols = leftSpots.length + 1 + rightSpots.length;
-    var colW = innerW / nCols;
-    ctx.strokeStyle='#333'; ctx.lineWidth=1.5; ctx.strokeRect(padL,padT,innerW,innerH);
-
-    // visual order: leftSpots, turn, rightSpots
-    var order = leftSpots.concat([turn]).concat(rightSpots);
-    order.forEach(function(sp, ci){
-      var x = padL + ci*colW;
-      if(sp===turn){
-        // rotated turn column: stack the two top rotated units vertically inside this column
-        var rows=[]; for(var t=TIERS-1;t>=0;t--){ if(occupied(turn,t)) rows.push(t); }
-        var show = rows.slice(0,2);
-        var ch = innerH/2;
-        show.forEach(function(t, ix){
-          var y = padT + ix*ch;
-          var c = colFor(labels[turn][t].code);
-          ctx.fillStyle=c.fill; ctx.fillRect(x+1,y+1,colW-2,ch-2);
-          ctx.strokeStyle='#cc2222'; ctx.lineWidth=1.5; ctx.strokeRect(x+1,y+1,colW-2,ch-2);
-          ctx.fillStyle=c.text; ctx.font='bold 12px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
-          ctx.fillText(labText(turn,t), x+colW/2, y+ch/2);
-        });
-        return;
-      }
-      var occT = topOccTier(sp);
-      if(occT<0) return;
-      // STAGGER (top view = front/back depth offset): alternate spots shifted vertically by 1/6 height
-      var stag = ((ci % 2) ? innerH*0.10 : 0);
-      var c = colFor(labels[sp][occT].code);
-      ctx.fillStyle=c.fill; ctx.fillRect(x+1, padT+1+stag, colW-2, innerH-2-stag);
-      ctx.strokeStyle=c.stroke; ctx.lineWidth=1; ctx.strokeRect(x+1, padT+1+stag, colW-2, innerH-2-stag);
-      ctx.save();
-      ctx.translate(x+colW/2, padT+(innerH+stag)/2);
-      ctx.rotate(-Math.PI/2);
-      ctx.fillStyle=c.text; ctx.font='bold 13px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(labText(sp,occT), 0, 0);
-      ctx.restore();
-    });
-  }
-
-  function drawSide(){
-    var cv=document.getElementById('cvSide'); if(!cv) return;
-    var W=cv.width, H=cv.height; var ctx=cv.getContext('2d');
-    ctx.clearRect(0,0,W,H);
-    var padL=12, padR=12, padT=8, padB=36;
-    var innerW=W-padL-padR, innerH=H-padT-padB;
-    var nCols = leftSpots.length + 1 + rightSpots.length;
-    var colW = innerW / nCols;
-    var rowH = innerH / TIERS;
-    var order = leftSpots.concat([turn]).concat(rightSpots);
-
-    // Draw tier by tier from bottom(0) to top, applying running-bond stagger:
-    // even tiers aligned, odd tiers shifted right by half a column. Cells that would
-    // overflow are clamped; the half-unit at the seam is drawn as a partial cell.
+var P = __PAYLOAD__;
+var M = P.meta||{};
+var colors = P.colors||{};
+var cells = P.cells||[];
+var items = P.items||[];
+var SPOTS = M.spots||15;
+var TIERS = P.tiers||4;
+var TURN = M.turn_spot||0;
+var BLOCK = M.blocked_spot||0;
+var DOOR_S = M.door_start||TURN;
+var DOOR_E = M.door_end||BLOCK;
+function num(x,d){return (x===null||x===undefined||isNaN(x))?(d||0):x;}
+function fmt(x){return num(x,0).toLocaleString();}
+function colorFor(code){var c=colors[code]; if(c&&c.fill) return c.fill; return "#7fc8c8";}
+// header
+document.getElementById("h_title").textContent = M.page_title||"Load Diagram";
+document.getElementById("h_meta").innerHTML = "Order: "+(M.order_number||"")+" &nbsp; Vehicle: "+(M.vehicle_number||"")+"<br>By: "+(M.created_by||"")+" &nbsp; "+(M.created_at||"");
+document.getElementById("h_payload").textContent = fmt(M.payload_lbs);
+document.getElementById("h_maxpay").textContent = fmt(M.max_payload_lbs);
+document.getElementById("h_vol").textContent = num(M.volume_pct,0).toFixed(0);
+document.getElementById("h_wt").textContent = num(M.weight_pct,0).toFixed(0);
+// settings table
+var st = [["Jurisdiction","286 000"],["Securement","Plywood"],["Floor spots",SPOTS],["Turn spot",TURN],["Order #",M.order_number||""],["Car ID",M.car_id||""]];
+var sh = "";
+st.forEach(function(r){sh += "<tr><th>"+r[0]+"</th><td>"+r[1]+"</td></tr>";});
+document.getElementById("tbl_settings").innerHTML = sh;
+// footer
+document.getElementById("f_spots").textContent = M.used_spots!=null?M.used_spots:SPOTS;
+document.getElementById("f_cg").textContent = num(M.cg_in,0).toFixed(2)+" (in)";
+document.getElementById("f_airbag").textContent = num(M.airbag_in,0).toFixed(2)+" (in)";
+document.getElementById("f_wue").textContent = num(M.total_units,0).toFixed(1);
+document.getElementById("f_lisa").textContent = num(M.total_units,0).toFixed(1);
+// build grid[spot][tier] = {pid,code} ; turn cells live at spot==TURN
+var grid = {};
+for (var sp=1; sp<=SPOTS; sp++){ grid[sp]=[]; for(var t=0;t<TIERS;t++) grid[sp][t]=null; }
+cells.forEach(function(c){ if(c.spot>=1&&c.spot<=SPOTS&&c.tier>=0&&c.tier<TIERS){ grid[c.spot][c.tier]={pid:c.pid, code:c.code}; } });
+function isTurnSpot(sp){ return TURN>0 && sp===TURN; }
+function spotFilled(sp){ if(sp===BLOCK) return false; for(var t=0;t<TIERS;t++){ if(grid[sp][t]) return true; } return false; }
+// ordered list of drawable spots left->right (skip blocked, it is absorbed by turn)
+var drawSpots=[]; for(var sp=1; sp<=SPOTS; sp++){ if(sp===BLOCK) continue; if(!spotFilled(sp)&&!isTurnSpot(sp)) continue; drawSpots.push(sp); }
+// SNAKING numbers: number per unit, left half up, right half down around doorway
+var numByCell = {}; // key spot+"_"+tier
+var leftSpots = drawSpots.filter(function(s){return s < TURN;});
+var rightSpots = drawSpots.filter(function(s){return s > BLOCK;});
+var n=1;
+leftSpots.forEach(function(sp){ for(var t=0;t<TIERS;t++){ if(grid[sp][t]){ numByCell[sp+"_"+t]=n++; } } });
+// turn column numbers
+if(TURN>0){ for(var t=0;t<TIERS;t++){ if(grid[TURN][t]){ numByCell[TURN+"_"+t]=n++; } } }
+// right side continues
+rightSpots.forEach(function(sp){ for(var t=0;t<TIERS;t++){ if(grid[sp][t]){ numByCell[sp+"_"+t]=n++; } } });
+// lines table (products)
+var lh = "<tr><th>#</th><th>Description</th><th>Qty</th><th>Wt</th></tr>";
+items.forEach(function(it,i){ lh += "<tr><td>"+(i+1)+"</td><td>"+(it.id||"")+"<br>"+((it.name||"").slice(0,40))+"</td><td>"+(it.qty||"")+"</td><td>"+fmt(it.wt)+"</td></tr>"; });
+document.getElementById("tbl_lines").innerHTML = lh;
+// items table (footer)
+var ih = "<tr><th>ITEM</th><th>Name/SKU</th><th>Product Id</th><th>Size (LxWxH)</th><th>Weight</th></tr>";
+items.forEach(function(it){ var sz=(it.L!=null?it.L:"")+"x"+(it.W!=null?it.W:"")+"x"+(it.H!=null?it.H:""); ih += "<tr><td>"+(it.code||"")+"</td><td>"+((it.name||"")) +"</td><td>"+(it.id||"")+"</td><td>"+sz+"</td><td>"+fmt(it.wt)+"</td></tr>"; });
+document.getElementById("tbl_items").innerHTML = ih;
+document.getElementById("legend").textContent = M.securement_text||"";
+// ===== SIDE1 VIEW =====
+function drawSide(){
+  var cv=document.getElementById("cvSide"); var ctx=cv.getContext("2d");
+  var W=cv.width, H=cv.height; ctx.clearRect(0,0,W,H);
+  var padX=20, padTop=20, padBot=40;
+  var floorY=H-padBot;
+  // column widths: normal=1 unit, turn=2 units. count total unit-widths
+  var leftN=leftSpots.length, rightN=rightSpots.length;
+  var turnW = TURN>0?2:0;
+  var totalUnits = leftN + rightN + turnW;
+  var colW = (W-2*padX)/Math.max(totalUnits,1);
+  var tierH = (floorY-padTop)/TIERS;
+  var halfStep = tierH*0.5;
+  // x position cursor
+  function drawStack(sp, x0, w, raise){
     for(var t=0;t<TIERS;t++){
-      var y = padT + (TIERS-1-t)*rowH;
-      var shift = (t % 2) ? colW*0.5 : 0;   // brick offset on alternating tiers
-      order.forEach(function(sp, ci){
-        if(!occupied(sp,t)) return;
-        var x = padL + ci*colW + shift;
-        var isT = (sp===turn);
-        var c = colFor(labels[sp][t].code);
-        var cw = colW - 2;
-        ctx.fillStyle=c.fill; ctx.fillRect(x+1, y+1, cw, rowH-2);
-        ctx.strokeStyle = isT ? '#cc2222' : c.stroke; ctx.lineWidth = isT ? 1.6 : 1;
-        ctx.strokeRect(x+1, y+1, cw, rowH-2);
-        ctx.fillStyle=c.text; ctx.font=(isT?'bold ':'')+'11px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
-        ctx.fillText(labels[sp][t].n + (isT?'r':'') + ' ' + labels[sp][t].code, x+colW/2, y+rowH/2);
-      });
+      var cell=grid[sp][t]; if(!cell) continue;
+      var y = floorY - (t+1)*tierH - raise;
+      ctx.fillStyle=colorFor(cell.code);
+      ctx.fillRect(x0, y, w-1, tierH-1);
+      ctx.strokeStyle="#333"; ctx.lineWidth=1; ctx.strokeRect(x0, y, w-1, tierH-1);
+      var lbl=(numByCell[sp+"_"+t]||"")+" "+(cell.code||"");
+      ctx.fillStyle="#111"; ctx.font="10px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.fillText(lbl, x0+w/2, y+tierH/2);
     }
-    // baseline + wheels
-    ctx.strokeStyle='#333'; ctx.lineWidth=1.5;
-    ctx.beginPath(); ctx.moveTo(padL,padT+innerH); ctx.lineTo(padL+innerW,padT+innerH); ctx.stroke();
-    var wy=padT+innerH+16;
-    [0.06,0.12,0.18, 0.82,0.88,0.94].forEach(function(fx){
-      var wx=padL+innerW*fx;
-      ctx.fillStyle='#555'; ctx.beginPath(); ctx.arc(wx,wy,9,0,Math.PI*2); ctx.fill();
-      ctx.fillStyle='#999'; ctx.beginPath(); ctx.arc(wx,wy,3,0,Math.PI*2); ctx.fill();
-    });
   }
-
-  drawTop(); drawSide();
-
-  function draw3D(){
-    var host=document.getElementById('three'); if(!host || !window.THREE) return;
-    var w=host.clientWidth||500, h=host.clientHeight||300;
-    var scene=new THREE.Scene(); scene.background=new THREE.Color(0xffffff);
-    var cam=new THREE.PerspectiveCamera(42, w/h, 0.1, 5000);
-    var renderer=new THREE.WebGLRenderer({antialias:true});
-    renderer.setSize(w,h); host.appendChild(renderer.domElement);
-    scene.add(new THREE.AmbientLight(0xffffff,0.75));
-    var dl=new THREE.DirectionalLight(0xffffff,0.7); dl.position.set(1,2,1); scene.add(dl);
-
-    var uW=2.0, uH=1.0, uD=3.0, gap=0.12;
-    var group=new THREE.Group();
-    var col = colFor((items[0]&&items[0].code)||'A');
-    var matFill=new THREE.MeshLambertMaterial({color:new THREE.Color(col.fill)});
-    var order = leftSpots.concat([turn]).concat(rightSpots);
-    var nCols = order.length;
-    var totalLen = nCols*(uW+gap);
-    order.forEach(function(sp, ci){
-      var px = ci*(uW+gap) - totalLen/2;
-      for(var t=0;t<TIERS;t++){
-        if(!occupied(sp,t)) continue;
-        var rot = (sp===turn);
-        // brick stagger in depth: alternate tiers shifted along Z
-        var zshift = (t%2)? uD*0.18 : -uD*0.0;
-        var geo = rot ? new THREE.BoxGeometry(uD*0.62,uH,uW) : new THREE.BoxGeometry(uW,uH,uD);
-        var mesh=new THREE.Mesh(geo,matFill);
-        mesh.position.set(px, t*(uH+0.05)+uH/2, zshift);
-        group.add(mesh);
-        var edges=new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({color:0x2b8e88}));
-        edges.position.copy(mesh.position); group.add(edges);
-      }
-    });
-    scene.add(group);
-    cam.position.set(totalLen*0.5, TIERS*1.7, totalLen*0.7);
-    cam.lookAt(0, TIERS*0.5, 0);
-    function animate(){ requestAnimationFrame(animate); renderer.render(scene,cam); }
-    animate();
+  // center-out stagger: doorway centered. left half stepped outward, right half stepped outward.
+  // raise pattern: nearest-to-door stack = 0, next out = halfStep, alternating.
+  var x = padX;
+  // LEFT side: spots far->near door. step outward means index from door.
+  for(var i=0;i<leftN;i++){ var sp=leftSpots[i]; var distFromDoor = leftN-1-i; var raise = (distFromDoor%2===1)?halfStep:0; drawStack(sp, x, colW, raise); x+=colW; }
+  // TURN column (wide, clean, no stagger)
+  if(TURN>0){
+    var tx=x, tw=colW*2;
+    for(var t=0;t<TIERS;t++){ var cell=grid[TURN][t]; if(!cell) continue; var y=floorY-(t+1)*tierH; ctx.fillStyle=colorFor(cell.code); ctx.fillRect(tx,y,tw-1,tierH-1); ctx.strokeStyle="#333"; ctx.strokeRect(tx,y,tw-1,tierH-1); var lbl=(numByCell[TURN+"_"+t]||"")+"r "+(cell.code||""); ctx.fillStyle="#111"; ctx.font="bold 11px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.fillText(lbl, tx+tw/2, y+tierH/2); }
+    // red doorway frame
+    ctx.strokeStyle="#d00"; ctx.lineWidth=2; ctx.strokeRect(tx-1, padTop-6, tw+2, floorY-padTop+6);
+    x+=tw;
   }
-  if(window.THREE){ draw3D(); } else { window.addEventListener('load', draw3D); }
-
+  // RIGHT side: spots near->far door. distFromDoor = index
+  for(var j=0;j<rightN;j++){ var sp2=rightSpots[j]; var raise2=(j%2===1)?halfStep:0; drawStack(sp2, x, colW, raise2); x+=colW; }
+  // car outline
+  ctx.strokeStyle="#1f3b73"; ctx.lineWidth=2; ctx.strokeRect(padX-2, padTop-8, W-2*padX+4, floorY-padTop+10);
+  // wheels
+  ctx.fillStyle="#555"; var wy=floorY+12; [padX+40,padX+80,W-padX-80,W-padX-40].forEach(function(wx){ ctx.beginPath(); ctx.arc(wx,wy,9,0,7); ctx.fill(); });
+}
+// ===== TOP VIEW =====
+function drawTop(){
+  var cv=document.getElementById("cvTop"); var ctx=cv.getContext("2d");
+  var W=cv.width,H=cv.height; ctx.clearRect(0,0,W,H);
+  var padX=20, padY=20; var bandTop=padY, bandBot=H-padY; var bandH=bandBot-bandTop;
+  var leftN=leftSpots.length, rightN=rightSpots.length; var turnW=TURN>0?2:0;
+  var totalUnits=leftN+rightN+turnW; var colW=(W-2*padX)/Math.max(totalUnits,1);
+  var boxH=bandH*0.6; var shift=bandH*0.18;
+  function topLabel(sp){ var rep=null; for(var t=0;t<TIERS;t++){ if(grid[sp][t]){ rep=grid[sp][t]; break; } } return rep; }
+  function drawTopCol(sp, x0, w, up){
+    var rep=topLabel(sp); if(!rep) return;
+    var y0 = up ? bandTop : (bandBot-boxH);
+    ctx.fillStyle=colorFor(rep.code); ctx.fillRect(x0,y0,w-1,boxH); ctx.strokeStyle="#333"; ctx.lineWidth=1; ctx.strokeRect(x0,y0,w-1,boxH);
+    // vertical label
+    ctx.save(); ctx.translate(x0+w/2, y0+boxH/2); ctx.rotate(-Math.PI/2); ctx.fillStyle="#111"; ctx.font="bold 11px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle";
+    var num0 = numByCell[sp+"_0"]||""; ctx.fillText(num0+" "+(rep.code||""), 0, 0); ctx.restore();
+  }
+  var x=padX;
+  for(var i=0;i<leftN;i++){ var sp=leftSpots[i]; var distFromDoor=leftN-1-i; var up=(distFromDoor%2===1); drawTopCol(sp,x,colW,up); x+=colW; }
+  // turn: 2 stacked half boxes in a 2-wide slot, centered, red frame
+  if(TURN>0){ var tx=x, tw=colW*2; var filled=[]; for(var t=0;t<TIERS;t++){ if(grid[TURN][t]) filled.push(t); }
+    var hh=bandH/2;
+    // draw two representative rotated units stacked
+    for(var k=0;k<2;k++){ var t2=filled[k!=null?k:0]; if(t2==null) t2=filled[0]; var cell=grid[TURN][t2!=null?t2:0]; if(!cell) cell=topLabel(TURN); if(!cell) continue; var yy=bandTop+k*hh; ctx.fillStyle=colorFor(cell.code); ctx.fillRect(tx,yy,tw-1,hh-1); ctx.strokeStyle="#333"; ctx.strokeRect(tx,yy,tw-1,hh-1); ctx.fillStyle="#111"; ctx.font="9px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle"; var nlbl=(numByCell[TURN+"_"+(filled[k]||0)]||"")+"r "+(cell.code||""); ctx.fillText(nlbl, tx+tw/2, yy+hh/2); }
+    ctx.strokeStyle="#d00"; ctx.lineWidth=2; ctx.strokeRect(tx-1,bandTop-4,tw+2,bandH+8); x+=tw; }
+  for(var j=0;j<rightN;j++){ var sp2=rightSpots[j]; var up2=(j%2===1); drawTopCol(sp2,x,colW,up2); x+=colW; }
+  ctx.strokeStyle="#1f3b73"; ctx.lineWidth=2; ctx.strokeRect(padX-2,bandTop-6,W-2*padX+4,bandH+12);
+}
+// ===== 3D VIEW =====
+function draw3D(){
+  var host=document.getElementById("three"); if(!host) return;
+  if(typeof THREE==="undefined"){ host.innerHTML="<div style=\"padding:20px;color:#888\">3D unavailable</div>"; return; }
+  var w=host.clientWidth||700, h=host.clientHeight||300;
+  var scene=new THREE.Scene(); scene.background=new THREE.Color(0xffffff);
+  var cam=new THREE.PerspectiveCamera(num(P.three&&P.three.cam_fov,40),w/h,0.1,5000);
+  var cp=(P.three&&P.three.cam_pos)||[60,40,90]; cam.position.set(cp[0]*2,cp[1]*2+20,cp[2]*2);
+  cam.lookAt(0,5,0);
+  var rend=new THREE.WebGLRenderer({antialias:true}); rend.setSize(w,h); host.innerHTML=""; host.appendChild(rend.domElement);
+  scene.add(new THREE.AmbientLight(0xffffff,num(P.three&&P.three.ambient_intensity,0.8)));
+  var dl=new THREE.DirectionalLight(0xffffff,num(P.three&&P.three.light_intensity,0.7)); dl.position.set(1,2,1); scene.add(dl);
+  var leftN=leftSpots.length,rightN=rightSpots.length,turnW=TURN>0?2:0; var totalUnits=leftN+rightN+turnW;
+  var UW=4, UH=3, UD=8; var gap=0.2;
+  var totalLen=totalUnits*(UW+gap);
+  var x=-totalLen/2;
+  function box(cx,cy,cz,sx,sy,sz,col,rot){ var g=new THREE.BoxGeometry(sx,sy,sz); var m=new THREE.MeshLambertMaterial({color:new THREE.Color(col)}); var mesh=new THREE.Mesh(g,m); mesh.position.set(cx,cy,cz); if(rot) mesh.rotation.y=Math.PI/2; scene.add(mesh); var eg=new THREE.LineSegments(new THREE.EdgesGeometry(g), new THREE.LineBasicMaterial({color:0x333333})); eg.position.copy(mesh.position); if(rot) eg.rotation.y=Math.PI/2; scene.add(eg); }
+  function stack3D(sp,cx,raise){ for(var t=0;t<TIERS;t++){ var cell=grid[sp][t]; if(!cell) continue; var cy=t*(UH+0.1)+UH/2+(raise||0); box(cx,cy,0,UW,UH,UD,colorFor(cell.code),false); } }
+  for(var i=0;i<leftN;i++){ var sp=leftSpots[i]; var d=leftN-1-i; var raise=(d%2===1)?UH*0.5:0; stack3D(sp, x+UW/2, raise); x+=UW+gap; }
+  if(TURN>0){ var tcx=x+UW; for(var t=0;t<TIERS;t++){ var cell=grid[TURN][t]; if(!cell) continue; var cy=t*(UH+0.1)+UH/2; box(tcx,cy,0,UD,UH,UW*2,colorFor(cell.code),true); }
+    // red doorway wireframe
+    var dg=new THREE.BoxGeometry(UW*2+gap,TIERS*(UH+0.1)+1,UD+1); var de=new THREE.LineSegments(new THREE.EdgesGeometry(dg), new THREE.LineBasicMaterial({color:0xdd0000})); de.position.set(tcx,TIERS*(UH+0.1)/2,0); scene.add(de); x+=UW*2+gap; }
+  for(var j=0;j<rightN;j++){ var sp2=rightSpots[j]; var raise2=(j%2===1)?UH*0.5:0; stack3D(sp2, x+UW/2, raise2); x+=UW+gap; }
+  // blue car bounding box
+  var cg=new THREE.BoxGeometry(totalLen+2,TIERS*(UH+0.1)+2,UD+2); var ce=new THREE.LineSegments(new THREE.EdgesGeometry(cg), new THREE.LineBasicMaterial({color:0x1f3b73})); ce.position.set(0,TIERS*(UH+0.1)/2,0); scene.add(ce);
+  rend.render(scene,cam);
+}
+try{ drawSide(); }catch(e){ console.error("drawSide",e); }
+try{ drawTop(); }catch(e){ console.error("drawTop",e); }
+try{ if(P.three&&P.three.enabled) draw3D(); }catch(e){ console.error("draw3D",e); }
 })();
-</script>
-
-</body>
-</html>
+</script></body></html>
 """
 
     html = HTML.replace("__PAYLOAD__", payload_json)
