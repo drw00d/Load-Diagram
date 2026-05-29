@@ -748,27 +748,61 @@ def render_routeA_component(
     ambient_intensity: float,
     flip_side: bool,
     height_px: int = 1040,
+    max_payload_lbs: float = 201900.0,
 ) -> None:
     tiers = len(matrix[0]) if matrix else 4
     blocked = blocked_spot_for_turn(turn_spot)
 
-    # Representative pid per spot (for TOP)
     rep: Dict[int, Optional[str]] = {}
     for s in range(1, FLOOR_SPOTS + 1):
         col = matrix[s - 1]
-        rep[s] = next((v for v in col if v and v != BLOCK), None)
+        rep[s] = next((x for x in col if x and x != BLOCK), None)
 
-    # Cells for SIDE + 3D
     cells = []
     for s in range(1, FLOOR_SPOTS + 1):
         for t in range(tiers):
             pid = matrix[s - 1][t]
             if pid is None or pid == BLOCK:
                 continue
-            # Skip mirrored blocked spot for TURN span
             if s == blocked and matrix[turn_spot - 1][t] == pid:
                 continue
             cells.append({"spot": s, "tier": t, "pid": pid, "code": code_for_pid(pid, products)})
+
+    prod_map = {}
+    for pid, p in products.items():
+        prod_map[pid] = {
+            "id": pid,
+            "desc": p.description or "",
+            "L": float(p.length) if p.length is not None else None,
+            "W": float(p.width) if p.width is not None else None,
+            "H": float(p.unit_height_in) if p.unit_height_in is not None else None,
+            "wt": float(p.unit_weight_lbs) if p.unit_weight_lbs is not None else None,
+            "pieces": float(p.piece_count) if p.piece_count is not None else None,
+            "code": code_for_pid(pid, products),
+        }
+
+    qty_by_pid = {}
+    for c in cells:
+        qty_by_pid[c["pid"]] = qty_by_pid.get(c["pid"], 0) + 1
+
+    total_units = sum(qty_by_pid.values())
+    used_spots = sum(1 for s in range(1, FLOOR_SPOTS + 1) if rep.get(s))
+    total_capacity = FLOOR_SPOTS * (tiers if tiers else 4)
+    volume_pct = (100.0 * total_units / total_capacity) if total_capacity else 0.0
+    payload_lbs = float(analysis.payload_lbs)
+    weight_pct = (100.0 * payload_lbs / max_payload_lbs) if max_payload_lbs else 0.0
+
+    items = []
+    for pid, q in qty_by_pid.items():
+        pm = prod_map.get(pid, {})
+        items.append({
+            "code": pm.get("code", "A"),
+            "qty": q,
+            "name": pm.get("desc", ""),
+            "id": pid,
+            "L": pm.get("L"), "W": pm.get("W"), "H": pm.get("H"),
+            "wt": pm.get("wt"),
+        })
 
     payload = {
         "meta": {
@@ -788,14 +822,19 @@ def render_routeA_component(
             "flip_side": bool(flip_side),
             "airbag_a": airbag_gap_choice[0],
             "airbag_b": airbag_gap_choice[1],
-            "airbag_in": float(airbag_in := airbag_gap_in),
+            "airbag_in": float(airbag_gap_in),
             "securement_text": analysis.securement.strap_text,
             "pct_blocked": float(analysis.securement.percent_blocked),
             "hatch_legend": analysis.securement.hatch_legend,
             "hatched_spots": analysis.hatched_spots,
             "honeycomb_required": bool(analysis.honeycomb_required),
             "honeycomb_spots": analysis.honeycomb_spots,
-            "payload_lbs": float(analysis.payload_lbs),
+            "payload_lbs": payload_lbs,
+            "max_payload_lbs": float(max_payload_lbs),
+            "volume_pct": float(volume_pct),
+            "weight_pct": float(weight_pct),
+            "total_units": total_units,
+            "used_spots": used_spots,
             "cg_in": float(analysis.cg_above_tor_in),
             "cg_status": analysis.cg_status,
             "weight_balance_ratio": float(analysis.weight_balance_ratio),
@@ -804,6 +843,7 @@ def render_routeA_component(
         "hatch": {"angle": float(hatch_angle_deg), "spacing": float(hatch_spacing_px), "alpha": float(hatch_alpha)},
         "rep": rep,
         "cells": cells,
+        "items": items,
         "three": {
             "enabled": bool(show_3d),
             "show_edges": bool(show_edges),
@@ -813,479 +853,234 @@ def render_routeA_component(
             "ambient_intensity": float(ambient_intensity),
         },
     }
-
     payload_json = json.dumps(payload)
 
     HTML = r"""
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<style>
-  body { margin:0; padding:0; background:#fff; font-family: Helvetica, Arial, sans-serif; }
-  .wrap { display:flex; flex-direction:row; gap:18px; padding:14px; }
-  canvas { background:#fff; border:1px solid #ddd; }
-  #page { width: 1420px; height: 980px; }
-  #three { width: 520px; height: 980px; }
-  .hidden { display:none; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <canvas id="page" width="1420" height="980"></canvas>
-  <canvas id="three" width="520" height="980"></canvas>
-</div>
-
-<script>
-const DATA = __PAYLOAD__;
-
-const LX_BLUE = "#0b2a7a";
-const LX_RED  = "#c00000";
-const LX_RED2 = "#d00000";
-const LX_GRID = "#000000";
-
-function drawHatch(ctx, x, y, w, h, angleDeg, spacing, alpha, color="#000") {
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.beginPath();
-  ctx.rect(x, y, w, h);
-  ctx.clip();
-
-  const angle = angleDeg * Math.PI / 180;
-  const diag = Math.sqrt(w*w + h*h);
-  const cx = x + w/2, cy = y + h/2;
-
-  ctx.translate(cx, cy);
-  ctx.rotate(angle);
-  ctx.translate(-cx, -cy);
-
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-
-  const start = -diag;
-  const end = diag*2;
-  for (let i = start; i < end; i += spacing) {
-    ctx.beginPath();
-    ctx.moveTo(x + i, y - diag);
-    ctx.lineTo(x + i, y + h + diag);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function fitRotated(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
-  let fs = maxPx;
-  while (fs >= minPx) {
-    ctx.font = `${weight} ${fs}px Helvetica, Arial, sans-serif`;
-    const w = ctx.measureText(text).width;
-    if (w <= maxH * 0.92 && fs <= maxW * 0.92) return fs;
-    fs -= 1;
-  }
-  return minPx;
-}
-
-function fitNormal(ctx, text, maxW, maxH, minPx, maxPx, weight="700") {
-  let fs = maxPx;
-  while (fs >= minPx) {
-    ctx.font = `${weight} ${fs}px Helvetica, Arial, sans-serif`;
-    const w = ctx.measureText(text).width;
-    if (w <= maxW * 0.92 && fs <= maxH * 0.72) return fs;
-    fs -= 1;
-  }
-  return minPx;
-}
-
-(function draw2D() {
-  const canvas = document.getElementById("page");
-  const ctx = canvas.getContext("2d");
-  const W = canvas.width, H = canvas.height;
-  ctx.clearRect(0,0,W,H);
-
-  // Outer frame
-  ctx.strokeStyle = LX_GRID;
-  ctx.lineWidth = 2;
-  ctx.strokeRect(10, 10, W-20, H-20);
-
-  // Title
-  ctx.fillStyle = "#111";
-  ctx.font = "700 22px Helvetica, Arial, sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText(DATA.meta.page_title, W/2, 38);
-
-  // Header table
-  const hx=30, hy=60, hw=W-60, hh=86;
-  ctx.strokeStyle = LX_GRID; ctx.lineWidth=2;
-  ctx.strokeRect(hx,hy,hw,hh);
-  const fr=[0.14,0.22,0.20,0.22,0.22];
-  const xs=[hx];
-  for (let i=0;i<fr.length-1;i++) xs.push(xs[xs.length-1] + hw*fr[i]);
-  for (let i=1;i<xs.length;i++){ ctx.beginPath(); ctx.moveTo(xs[i],hy); ctx.lineTo(xs[i],hy+hh); ctx.stroke(); }
-  const midY = hy + hh*0.55;
-  ctx.beginPath(); ctx.moveTo(hx,midY); ctx.lineTo(hx+hw,midY); ctx.stroke();
-
-  const headers=["Created By","Created At","Order Number","Vehicle Number","PO Number"];
-  const vals=[DATA.meta.created_by, DATA.meta.created_at, DATA.meta.order_number, DATA.meta.vehicle_number, DATA.meta.po_number];
-  ctx.textAlign="left";
-  for (let i=0;i<5;i++){
-    ctx.fillStyle="#111";
-    ctx.font="700 14px Helvetica, Arial, sans-serif";
-    ctx.fillText(headers[i], xs[i]+10, hy+24);
-    ctx.font="400 16px Helvetica, Arial, sans-serif";
-    ctx.fillText(vals[i], xs[i]+10, midY+28);
-  }
-
-  // Panels
-  const topX = 360, topY = 182, topW = W - topX - 40, topH = 160;
-  const sideX = topX, sideY = topY + topH + 55, sideW = topW, sideH = 260;
-
-  // ---- TOP ----
-  ctx.fillStyle="#111";
-  ctx.font="700 16px Helvetica, Arial, sans-serif";
-  ctx.textAlign="center";
-  ctx.fillText("Top", topX + topW/2, topY - 10);
-
-  ctx.strokeStyle=LX_BLUE; ctx.lineWidth=3;
-  ctx.strokeRect(topX, topY, topW, topH);
-
-  // Ruler
-  const rulerY = topY - 14;
-  ctx.strokeStyle = LX_BLUE;
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(topX, rulerY); ctx.lineTo(topX+topW, rulerY); ctx.stroke();
-  ctx.lineWidth = 1;
-  for (let i=0;i<=70;i++){
-    const tx = topX + topW*i/70;
-    const th = (i%5===0)?10:6;
-    ctx.beginPath(); ctx.moveTo(tx, rulerY); ctx.lineTo(tx, rulerY+th); ctx.stroke();
-  }
-
-  const spots = DATA.meta.spots;
-  const cellW = topW / spots;
-  const gutterFrac = 0.10;
-  const padY = 12;
-  const blockH = topH - padY*2;
-
-  const order = [];
-  for (let s=1;s<=spots;s++) order.push(s);
-  if (DATA.meta.flip_side) order.reverse();
-
-  // Doorway band
-  const doorLeft = topX + (DATA.meta.door_start-1)*cellW;
-  const doorRight = topX + (DATA.meta.door_end)*cellW;
-  ctx.strokeStyle = LX_RED; ctx.lineWidth=3;
-  ctx.strokeRect(doorLeft, topY, doorRight-doorLeft, topH);
-
-  ctx.font="400 12px Helvetica, Arial, sans-serif";
-  ctx.fillStyle = LX_RED;
-  ctx.textAlign="left";
-  ctx.fillText(`Doorway (Spots ${DATA.meta.door_start}-${DATA.meta.door_end})`, doorLeft+6, topY-4);
-
-  // Airbag band
-  const airX = topX + DATA.meta.airbag_a * cellW;
-  ctx.fillStyle = LX_RED2;
-  ctx.fillRect(airX-3, topY, 6, topH);
-
-  // Turn hatch region
-  const tz = topX + (DATA.meta.turn_spot-1)*cellW;
-  drawHatch(ctx, tz, topY, cellW*2, topH, 45, 10, 0.10, "#000");
-  ctx.strokeStyle="#111"; ctx.lineWidth=1;
-  ctx.strokeRect(tz, topY, cellW*2, topH);
-  ctx.fillStyle="#111";
-  ctx.font="700 12px Helvetica, Arial, sans-serif";
-  ctx.textAlign="center";
-  ctx.fillText(`FORKLIFT TURN (${DATA.meta.turn_spot}-${DATA.meta.blocked_spot})`, tz + cellW, topY+16);
-
-  // TOP drawing helper
-  function fillForSpot(spot) {
-    const pid = DATA.rep[String(spot)] || null;
-    if (!pid) return "#fff";
-    const cell = DATA.cells.find(z => z.spot === spot);
-    const code = (cell && cell.code) ? cell.code : "A";
-    return (DATA.colors[code] && DATA.colors[code].fill) ? DATA.colors[code].fill : "#fff";
-  }
-
-  // Draw TOP blocks:
-  // - Normal: each spot draws itself.
-  for (let i=0;i<order.length;i++){
-    const s = order[i];
-
-
-    const isDoor = (s >= DATA.meta.door_start && s <= DATA.meta.door_end);
-
-    // Determine span
-    let span = 1;
-
-    const pid = DATA.rep[String(s)] || null;
-
-    const x = topX + i*cellW;
-    const gx = x + cellW*gutterFrac*0.5;
-    const gw = cellW*(span - gutterFrac);
-
-    let fill = "#fff";
-    if (pid){
-      fill = fillForSpot(s);
-    }
-
-    ctx.fillStyle = fill;
-    ctx.fillRect(gx, topY + padY, gw, blockH);
-    ctx.strokeStyle="#111"; ctx.lineWidth=1;
-    ctx.strokeRect(gx, topY + padY, gw, blockH);
-
-    if (pid){
-      // PDFs: doorway labels are horizontal
-      if (isDoor){
-        const fs = fitNormal(ctx, pid, gw-8, blockH-8, 10, 20, "700");
-        ctx.font = `700 ${fs}px Helvetica, Arial, sans-serif`;
-        ctx.fillStyle="#111";
-        ctx.textAlign="center";
-        ctx.textBaseline="middle";
-        ctx.fillText(pid, gx+gw/2, topY+padY+blockH/2);
-      } else {
-        const fs = fitRotated(ctx, pid, gw, blockH, 10, 22, "700");
-        ctx.save();
-        ctx.translate(gx+gw/2, topY+padY+blockH/2);
-        ctx.rotate(-Math.PI/2);
-        ctx.font = `700 ${fs}px Helvetica, Arial, sans-serif`;
-        ctx.fillStyle="#111";
-        ctx.textAlign="center";
-        ctx.textBaseline="middle";
-        ctx.fillText(pid, 0, 0);
-        ctx.restore();
-      }
-    }
-
-    // Hatch only where step-down requires cord strap and straps are required
-    if (DATA.meta.hatched_spots.includes(s)){
-      drawHatch(ctx, gx, topY + padY, gw, blockH, DATA.hatch.angle, DATA.hatch.spacing, DATA.hatch.alpha, "#000");
-    }
-  }
-
-  // ---- SIDE ----
-  ctx.fillStyle="#111";
-  ctx.font="700 16px Helvetica, Arial, sans-serif";
-  ctx.textAlign="center";
-  ctx.fillText(DATA.meta.flip_side ? "Side2" : "Side1", sideX + sideW/2, sideY - 10);
-
-  ctx.strokeStyle=LX_BLUE; ctx.lineWidth=3;
-  ctx.strokeRect(sideX, sideY, sideW, sideH);
-
-  const sidePad = 14;
-  const sx = sideX + sidePad;
-  const sy = sideY + sidePad;
-  const sw = sideW - 2*sidePad;
-  const sh = sideH - 2*sidePad - 36;
-
-  const cw = sw / spots;
-  const ch = sh / DATA.meta.tiers;
-
-  // Doorway band
-  const sDoorLeft = sx + (DATA.meta.door_start-1)*cw;
-  const sDoorRight = sx + (DATA.meta.door_end)*cw;
-  ctx.strokeStyle = LX_RED; ctx.lineWidth=3;
-  ctx.strokeRect(sDoorLeft, sy, sDoorRight-sDoorLeft, sh);
-
-  // Airbag band
-  const sAirX = sx + DATA.meta.airbag_a * cw;
-  ctx.fillStyle = LX_RED2;
-  ctx.fillRect(sAirX-3, sy, 6, sh);
-
-  const blankSpot = DATA.meta.blocked_spot;
-  const order2 = order.slice();
-
-  // Blank blocked spot band
-  const blankIdx = order2.indexOf(blankSpot);
-  if (blankIdx >= 0){
-    const bx = sx + blankIdx*cw;
-    ctx.fillStyle="#fff";
-    ctx.fillRect(bx, sy, cw, sh);
-    ctx.strokeStyle = LX_RED; ctx.lineWidth=2;
-    ctx.strokeRect(bx, sy, cw, sh);
-  }
-
-  function drawCellRect(x, y, w, h, fill, pid){
-    ctx.fillStyle = fill;
-    ctx.fillRect(x+1, y+1, w-2, h-2);
-    ctx.strokeStyle="#111";
-    ctx.strokeRect(x+1, y+1, w-2, h-2);
-    const fs = fitNormal(ctx, pid, w-6, h-6, 8, 14, "700");
-    ctx.font = `700 ${fs}px Helvetica, Arial, sans-serif`;
-    ctx.fillStyle="#111";
-    ctx.textAlign="center";
-    ctx.textBaseline="middle";
-    ctx.fillText(pid, x+w/2, y+h/2);
-  }
-
-  // Draw SIDE columns
-  for (let i=0;i<order2.length;i++){
-    const spot = order2[i];
-
-
-    const x = sx + i*cw;
-
-    // determine span
-    let span = 1;
-    const isDoor = (spot>=DATA.meta.door_start && spot<=DATA.meta.door_end);
-
-    // grid outline
-    ctx.strokeStyle="rgba(17,17,17,0.55)";
-    ctx.lineWidth=1;
-    ctx.strokeRect(x, sy, cw*span, sh);
-
-    if (spot === blankSpot) continue;
-
-    for (let t=0;t<DATA.meta.tiers;t++){
-      const y = sy + sh - (t+1)*ch;
-      const cell = DATA.cells.find(z => z.spot === spot && z.tier === t);
-      if (!cell) continue;
-      const fill = (DATA.colors[cell.code] && DATA.colors[cell.code].fill) ? DATA.colors[cell.code].fill : "#fff";
-      drawCellRect(x, y, cw*span, ch, fill, cell.pid);
-    }
-
-    if (DATA.meta.hatched_spots.includes(spot)){
-      drawHatch(ctx, x+1, sy+1, cw*span-2, sh-2, DATA.hatch.angle, DATA.hatch.spacing, DATA.hatch.alpha, "#000");
-    }
-  }
-
-  // Spot numbers
-  ctx.fillStyle="#111";
-  ctx.font="400 12px Helvetica, Arial, sans-serif";
-  ctx.textAlign="center";
-  for (let i=0;i<order2.length;i++){
-    const sp = order2[i];
-    const x = sx + i*cw;
-    let span = 1;
-    const isDoor = (sp>=DATA.meta.door_start && sp<=DATA.meta.door_end);
-    ctx.fillText(String(sp), x+(cw*span)/2, sy+sh+22);
-  }
-
-  // Wheels
-  const wheelY = sideY + sideH - 26;
-  const wxs = [sideX+sideW*0.20, sideX+sideW*0.27, sideX+sideW*0.73, sideX+sideW*0.80];
-  ctx.fillStyle="rgba(80,80,80,0.85)";
-  for (const wx of wxs){
-    ctx.beginPath();
-    ctx.arc(wx, wheelY, 14, 0, Math.PI*2);
-    ctx.fill();
-  }
-
-  // Footer metrics
-  const fx=30, fy=sideY + sideH + 18, fw=W-60, fh=88;
-  ctx.strokeStyle=LX_GRID; ctx.lineWidth=1.5;
-  ctx.strokeRect(fx,fy,fw,fh);
-  const cols=[0.25,0.25,0.25,0.25];
-  const fxs=[fx];
-  for (let i=0;i<cols.length-1;i++) fxs.push(fxs[fxs.length-1] + fw*cols[i]);
-  for (let i=1;i<fxs.length;i++){ ctx.beginPath(); ctx.moveTo(fxs[i],fy); ctx.lineTo(fxs[i],fy+fh); ctx.stroke(); }
-
-  ctx.fillStyle="#111";
-  ctx.textAlign="left";
-  ctx.font="700 12px Helvetica, Arial, sans-serif";
-  ctx.fillText(`% Blocked = ${DATA.meta.pct_blocked.toFixed(1)}%`, fxs[0]+10, fy+22);
-  ctx.fillText(DATA.meta.securement_text, fxs[0]+10, fy+42);
-
-  ctx.fillText(`Payload (lbs) = ${DATA.meta.payload_lbs.toFixed(0)}`, fxs[1]+10, fy+22);
-  ctx.fillText(`Weight balance ratio = ${(DATA.meta.weight_balance_ratio*100).toFixed(1)}%`, fxs[1]+10, fy+42);
-
-  ctx.fillText(`CG above TOR (in) = ${DATA.meta.cg_in.toFixed(2)}`, fxs[2]+10, fy+22);
-  ctx.fillText(`CG status = ${DATA.meta.cg_status}`, fxs[2]+10, fy+42);
-
-  ctx.fillText(`Hatch legend:`, fxs[3]+10, fy+22);
-  ctx.font="400 12px Helvetica, Arial, sans-serif";
-  ctx.fillText(DATA.meta.hatch_legend, fxs[3]+10, fy+42);
-
-  if (DATA.meta.honeycomb_required){
-    ctx.font="700 12px Helvetica, Arial, sans-serif";
-    ctx.fillStyle="#111";
-    ctx.fillText(`3" honeycomb dunnage required (void between tiers) at spots: ${DATA.meta.honeycomb_spots.join(", ")}`, 40, fy+72);
-  }
-})();
-</script>
-
+<!DOCTYPE html><html><head><meta charset="utf-8">
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<style>
+*{box-sizing:border-box;}
+body{font-family:Arial,Helvetica,sans-serif;margin:0;padding:8px;color:#111;background:#fff;}
+.hdr{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #1f3b73;padding-bottom:4px;margin-bottom:6px;}
+.hdr .title{font-size:18px;font-weight:bold;color:#1f3b73;}
+.hdr .meta{font-size:11px;text-align:right;color:#333;}
+.statbar{display:flex;gap:24px;font-size:12px;margin:4px 0 8px;color:#1f3b73;font-weight:bold;}
+.statbar span b{color:#1f3b73;}
+.layout{display:flex;gap:10px;}
+.col-left{width:320px;flex:0 0 320px;}
+.col-right{flex:1;}
+table.grid{border-collapse:collapse;width:100%;font-size:11px;margin-bottom:8px;}
+table.grid th,table.grid td{border:1px solid #888;padding:3px 5px;text-align:left;}
+table.grid th{background:#eef1f7;}
+.viewbox{border:1px solid #ccc;margin-bottom:8px;padding:4px;}
+.viewtitle{text-align:center;font-weight:bold;font-size:13px;margin:2px 0;}
+canvas{display:block;width:100%;}
+#three{width:100%;height:300px;}
+.footer{border-top:2px solid #1f3b73;margin-top:6px;padding-top:4px;font-size:12px;}
+.footrow{display:flex;justify-content:space-between;margin:2px 0;}
+.legend{font-size:10px;color:#444;margin-top:4px;}
+</style></head><body>
+<div class="hdr">
+  <div class="title" id="h_title"></div>
+  <div class="meta" id="h_meta"></div>
+</div>
+<div class="statbar">
+  <span>Payload : <b id="h_payload"></b></span>
+  <span>MaxPayload : <b id="h_maxpay"></b></span>
+  <span>Volume % : <b id="h_vol"></b></span>
+  <span>Weight % : <b id="h_wt"></b></span>
+</div>
+<div class="layout">
+  <div class="col-left">
+    <table class="grid" id="tbl_settings"></table>
+    <table class="grid" id="tbl_lines"></table>
+  </div>
+  <div class="col-right">
+    <div class="viewbox"><div class="viewtitle">3D</div><div id="three"></div></div>
+    <div class="viewbox"><div class="viewtitle">Top</div><canvas id="cvTop" width="1100" height="170"></canvas></div>
+    <div class="viewbox"><div class="viewtitle">Side1</div><canvas id="cvSide" width="1100" height="240"></canvas></div>
+  </div>
+</div>
+<div class="footer">
+  <div class="footrow"><span>Floor spots = <b id="f_spots"></b></span><span>C.G. height = <b id="f_cg"></b></span><span>Airbag Space = <b id="f_airbag"></b></span><span>Whole Unit Equivalent = <b id="f_wue"></b></span></div>
+  <div class="footrow"><span>Secure Loads from: <span id="sw_diag"></span> sliding &nbsp; <span id="sw_vert"></span> tipping &amp; sliding</span><span>Total LISA Units = <b id="f_lisa"></b></span></div>
+  <table class="grid" id="tbl_items"></table>
+  <div class="legend" id="legend"></div>
+</div>
 <script>
-(function drawThree() {
-  const canvas = document.getElementById('three');
-  if (!DATA.three.enabled) { canvas.classList.add("hidden"); return; }
-
-  const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
-  renderer.setSize(canvas.width, canvas.height, false);
-
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xffffff);
-
-  const camera = new THREE.PerspectiveCamera(DATA.three.cam_fov, canvas.width/canvas.height, 0.1, 2000);
-  camera.position.set(DATA.three.cam_pos[0], DATA.three.cam_pos[1], DATA.three.cam_pos[2]);
-  camera.lookAt(0, 0, 0);
-
-  scene.add(new THREE.AmbientLight(0xffffff, DATA.three.ambient_intensity));
-  const dir = new THREE.DirectionalLight(0xffffff, DATA.three.light_intensity);
-  dir.position.set(8, 12, 10);
-  scene.add(dir);
-
-  const grid = new THREE.GridHelper(24, 24, 0xcccccc, 0xeeeeee);
-  grid.position.y = -0.01;
-  scene.add(grid);
-
-  const spots = DATA.meta.spots;
-  const tiers = DATA.meta.tiers;
-
-  const spotW = 0.9;
-  const spotD = 1.05;
-  const tierH = 0.22;
-
-  const x0 = -(spots * spotW) / 2 + spotW/2;
-
-  const mats = new Map();
-  function matForCode(code) {
-    if (mats.has(code)) return mats.get(code);
-    const fill = (DATA.colors[code] && DATA.colors[code].fill) ? DATA.colors[code].fill : "#ffffff";
-    const m = new THREE.MeshLambertMaterial({ color: new THREE.Color(fill) });
-    mats.set(code, m);
-    return m;
-  }
-
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0x111111 });
-  const group = new THREE.Group();
-  scene.add(group);
-
-  for (const c of DATA.cells) {
-    const spotIndex = (DATA.meta.flip_side) ? (spots - c.spot) : (c.spot - 1);
-    const x = x0 + spotIndex * spotW;
-    const y = (c.tier + 0.5) * tierH;
-    const z = 0;
-
-    const geo = new THREE.BoxGeometry(spotW*0.96, tierH*0.92, spotD*0.92);
-    const mesh = new THREE.Mesh(geo, matForCode(c.code));
-    mesh.position.set(x, y, z);
-    group.add(mesh);
-
-    if (DATA.three.show_edges) {
-      const edges = new THREE.EdgesGeometry(geo);
-      const line = new THREE.LineSegments(edges, edgeMat);
-      line.position.copy(mesh.position);
-      group.add(line);
+(function(){
+var P = __PAYLOAD__;
+var M = P.meta||{};
+var colors = P.colors||{};
+var cells = P.cells||[];
+var items = P.items||[];
+var SPOTS = M.spots||15;
+var TIERS = P.tiers||4;
+var TURN = M.turn_spot||0;
+var BLOCK = M.blocked_spot||0;
+var DOOR_S = M.door_start||TURN;
+var DOOR_E = M.door_end||BLOCK;
+function num(x,d){return (x===null||x===undefined||isNaN(x))?(d||0):x;}
+function fmt(x){return num(x,0).toLocaleString();}
+function colorFor(code){var c=colors[code]; if(c&&c.fill) return c.fill; return "#7fc8c8";}
+// header
+document.getElementById("h_title").textContent = M.page_title||"Load Diagram";
+document.getElementById("h_meta").innerHTML = "Order: "+(M.order_number||"")+" &nbsp; Vehicle: "+(M.vehicle_number||"")+"<br>By: "+(M.created_by||"")+" &nbsp; "+(M.created_at||"");
+document.getElementById("h_payload").textContent = fmt(M.payload_lbs);
+document.getElementById("h_maxpay").textContent = fmt(M.max_payload_lbs);
+document.getElementById("h_vol").textContent = num(M.volume_pct,0).toFixed(0);
+document.getElementById("h_wt").textContent = num(M.weight_pct,0).toFixed(0);
+// settings table
+var st = [["Jurisdiction","286 000"],["Securement","Plywood"],["Floor spots",SPOTS],["Turn spot",TURN],["Order #",M.order_number||""],["Car ID",M.car_id||""]];
+var sh = "";
+st.forEach(function(r){sh += "<tr><th>"+r[0]+"</th><td>"+r[1]+"</td></tr>";});
+document.getElementById("tbl_settings").innerHTML = sh;
+// footer
+document.getElementById("f_spots").textContent = M.used_spots!=null?M.used_spots:SPOTS;
+document.getElementById("f_cg").textContent = num(M.cg_in,0).toFixed(2)+" (in)";
+document.getElementById("f_airbag").textContent = num(M.airbag_in,0).toFixed(2)+" (in)";
+document.getElementById("f_wue").textContent = num(M.total_units,0).toFixed(1);
+document.getElementById("f_lisa").textContent = num(M.total_units,0).toFixed(1);
+// build grid[spot][tier] = {pid,code} ; turn cells live at spot==TURN
+var grid = {};
+for (var sp=1; sp<=SPOTS; sp++){ grid[sp]=[]; for(var t=0;t<TIERS;t++) grid[sp][t]=null; }
+cells.forEach(function(c){ if(c.spot>=1&&c.spot<=SPOTS&&c.tier>=0&&c.tier<TIERS){ grid[c.spot][c.tier]={pid:c.pid, code:c.code}; } });
+function isTurnSpot(sp){ return TURN>0 && sp===TURN; }
+function spotFilled(sp){ if(sp===BLOCK) return false; for(var t=0;t<TIERS;t++){ if(grid[sp][t]) return true; } return false; }
+// ordered list of drawable spots left->right (skip blocked, it is absorbed by turn)
+var drawSpots=[]; for(var sp=1; sp<=SPOTS; sp++){ if(sp===BLOCK) continue; if(!spotFilled(sp)&&!isTurnSpot(sp)) continue; drawSpots.push(sp); }
+// SNAKING numbers: number per unit, left half up, right half down around doorway
+var numByCell = {}; // key spot+"_"+tier
+var leftSpots = drawSpots.filter(function(s){return s < TURN;});
+var rightSpots = drawSpots.filter(function(s){return s > BLOCK;});
+var n=1;
+leftSpots.forEach(function(sp){ for(var t=0;t<TIERS;t++){ if(grid[sp][t]){ numByCell[sp+"_"+t]=n++; } } });
+// turn column numbers
+if(TURN>0){ for(var t=0;t<TIERS;t++){ if(grid[TURN][t]){ numByCell[TURN+"_"+t]=n++; } } }
+// right side continues
+rightSpots.forEach(function(sp){ for(var t=0;t<TIERS;t++){ if(grid[sp][t]){ numByCell[sp+"_"+t]=n++; } } });
+// lines table (products)
+var lh = "<tr><th>#</th><th>Description</th><th>Qty</th><th>Wt</th></tr>";
+items.forEach(function(it,i){ lh += "<tr><td>"+(i+1)+"</td><td>"+(it.id||"")+"<br>"+((it.name||"").slice(0,40))+"</td><td>"+(it.qty||"")+"</td><td>"+fmt(it.wt)+"</td></tr>"; });
+document.getElementById("tbl_lines").innerHTML = lh;
+// items table (footer)
+var ih = "<tr><th>ITEM</th><th>Name/SKU</th><th>Product Id</th><th>Size (LxWxH)</th><th>Weight</th></tr>";
+items.forEach(function(it){ var sz=(it.L!=null?it.L:"")+"x"+(it.W!=null?it.W:"")+"x"+(it.H!=null?it.H:""); ih += "<tr><td>"+(it.code||"")+"</td><td>"+((it.name||"")) +"</td><td>"+(it.id||"")+"</td><td>"+sz+"</td><td>"+fmt(it.wt)+"</td></tr>"; });
+document.getElementById("tbl_items").innerHTML = ih;
+document.getElementById("legend").textContent = M.securement_text||"";
+// ===== SIDE1 VIEW =====
+function drawSide(){
+  var cv=document.getElementById("cvSide"); var ctx=cv.getContext("2d");
+  var W=cv.width, H=cv.height; ctx.clearRect(0,0,W,H);
+  var padX=20, padTop=20, padBot=40;
+  var floorY=H-padBot;
+  // column widths: normal=1 unit, turn=2 units. count total unit-widths
+  var leftN=leftSpots.length, rightN=rightSpots.length;
+  var turnW = TURN>0?2:0;
+  var totalUnits = leftN + rightN + turnW;
+  var colW = (W-2*padX)/Math.max(totalUnits,1);
+  var tierH = (floorY-padTop)/TIERS;
+  var halfStep = 0;
+  // x position cursor
+  function drawStack(sp, x0, w, raise){
+    for(var t=0;t<TIERS;t++){
+      var cell=grid[sp][t]; if(!cell) continue;
+      var y = floorY - (t+1)*tierH - raise;
+      ctx.fillStyle=colorFor(cell.code);
+      ctx.fillRect(x0, y, w-1, tierH-1);
+      ctx.strokeStyle="#333"; ctx.lineWidth=1; ctx.strokeRect(x0, y, w-1, tierH-1);
+      var lbl=(numByCell[sp+"_"+t]||"")+" "+(cell.code||"");
+      ctx.fillStyle="#111"; ctx.font="10px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.fillText(lbl, x0+w/2, y+tierH/2);
     }
   }
-
-  const frameGeo = new THREE.BoxGeometry(spots*spotW*1.02, tiers*tierH*1.02 + 0.1, spotD*1.05);
-  const frameEdges = new THREE.EdgesGeometry(frameGeo);
-  const frame = new THREE.LineSegments(frameEdges, new THREE.LineBasicMaterial({ color: 0x0b2a7a }));
-  frame.position.set(0, (tiers*tierH)/2, 0);
-  group.add(frame);
-
-  function render() {
-    renderer.render(scene, camera);
-    requestAnimationFrame(render);
+  // center-out stagger: doorway centered. left half stepped outward, right half stepped outward.
+  // raise pattern: nearest-to-door stack = 0, next out = halfStep, alternating.
+  var x = padX;
+  // LEFT side: spots far->near door. step outward means index from door.
+  for(var i=0;i<leftN;i++){ var sp=leftSpots[i]; var distFromDoor = leftN-1-i; var raise = (distFromDoor%2===1)?halfStep:0; drawStack(sp, x, colW, raise); x+=colW; }
+  // TURN column (wide, clean, no stagger)
+  if(TURN>0){
+    var tx=x, tw=colW*2;
+    for(var t=0;t<TIERS;t++){ var cell=grid[TURN][t]; if(!cell) continue; var y=floorY-(t+1)*tierH; ctx.fillStyle=colorFor(cell.code); ctx.fillRect(tx,y,tw-1,tierH-1); ctx.strokeStyle="#333"; ctx.strokeRect(tx,y,tw-1,tierH-1); var lbl=(numByCell[TURN+"_"+t]||"")+"r "+(cell.code||""); ctx.fillStyle="#111"; ctx.font="bold 11px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.fillText(lbl, tx+tw/2, y+tierH/2); }
+    // red doorway frame
+    ctx.strokeStyle="#d00"; ctx.lineWidth=2; ctx.strokeRect(tx-1, padTop-6, tw+2, floorY-padTop+6);
+    x+=tw;
   }
-  render();
+  // RIGHT side: spots near->far door. distFromDoor = index
+  for(var j=0;j<rightN;j++){ var sp2=rightSpots[j]; var raise2=(j%2===1)?halfStep:0; drawStack(sp2, x, colW, raise2); x+=colW; }
+  // car outline
+  ctx.strokeStyle="#1f3b73"; ctx.lineWidth=2; ctx.strokeRect(padX-2, padTop-8, W-2*padX+4, floorY-padTop+10);
+  // wheels
+  ctx.fillStyle="#555"; var wy=floorY+12; [padX+40,padX+80,W-padX-80,W-padX-40].forEach(function(wx){ ctx.beginPath(); ctx.arc(wx,wy,9,0,7); ctx.fill(); });
+}
+// ===== TOP VIEW =====
+function drawTop(){
+  var cv=document.getElementById("cvTop"); var ctx=cv.getContext("2d");
+  var W=cv.width,H=cv.height; ctx.clearRect(0,0,W,H);
+  var padX=20, padY=20; var bandTop=padY, bandBot=H-padY; var bandH=bandBot-bandTop;
+  var leftN=leftSpots.length, rightN=rightSpots.length; var turnW=TURN>0?2:0;
+  var totalUnits=leftN+rightN+turnW; var colW=(W-2*padX)/Math.max(totalUnits,1);
+  var boxH=bandH*0.6; var shift=bandH*0.18;
+  function topLabel(sp){ var rep=null; for(var t=0;t<TIERS;t++){ if(grid[sp][t]){ rep=grid[sp][t]; break; } } return rep; }
+  function drawTopCol(sp, x0, w, up){
+    var rep=topLabel(sp); if(!rep) return;
+    var y0 = bandTop + (bandH - boxH)/2;
+    ctx.fillStyle=colorFor(rep.code); ctx.fillRect(x0,y0,w-1,boxH); ctx.strokeStyle="#333"; ctx.lineWidth=1; ctx.strokeRect(x0,y0,w-1,boxH);
+    // vertical label
+    ctx.save(); ctx.translate(x0+w/2, y0+boxH/2); ctx.rotate(-Math.PI/2); ctx.fillStyle="#111"; ctx.font="bold 11px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle";
+    var num0 = numByCell[sp+"_0"]||""; ctx.fillText(num0+" "+(rep.code||""), 0, 0); ctx.restore();
+  }
+  var x=padX;
+  for(var i=0;i<leftN;i++){ var sp=leftSpots[i]; var distFromDoor=leftN-1-i; var up=(distFromDoor%2===1); drawTopCol(sp,x,colW,up); x+=colW; }
+  // turn: 2 stacked half boxes in a 2-wide slot, centered, red frame
+  if(TURN>0){ var tx=x, tw=colW*2; var filled=[]; for(var t=0;t<TIERS;t++){ if(grid[TURN][t]) filled.push(t); }
+    var hh=bandH/2;
+    // draw two representative rotated units stacked
+    for(var k=0;k<2;k++){ var t2=filled[k!=null?k:0]; if(t2==null) t2=filled[0]; var cell=grid[TURN][t2!=null?t2:0]; if(!cell) cell=topLabel(TURN); if(!cell) continue; var yy=bandTop+k*hh; ctx.fillStyle=colorFor(cell.code); ctx.fillRect(tx,yy,tw-1,hh-1); ctx.strokeStyle="#333"; ctx.strokeRect(tx,yy,tw-1,hh-1); ctx.fillStyle="#111"; ctx.font="9px Arial"; ctx.textAlign="center"; ctx.textBaseline="middle"; var nlbl=(numByCell[TURN+"_"+(filled[k]||0)]||"")+"r "+(cell.code||""); ctx.fillText(nlbl, tx+tw/2, yy+hh/2); }
+    ctx.strokeStyle="#d00"; ctx.lineWidth=2; ctx.strokeRect(tx-1,bandTop-4,tw+2,bandH+8); x+=tw; }
+  for(var j=0;j<rightN;j++){ var sp2=rightSpots[j]; var up2=(j%2===1); drawTopCol(sp2,x,colW,up2); x+=colW; }
+  ctx.strokeStyle="#1f3b73"; ctx.lineWidth=2; ctx.strokeRect(padX-2,bandTop-6,W-2*padX+4,bandH+12);
+}
+// ===== 3D VIEW =====
+function draw3D(){
+  var host=document.getElementById("three"); if(!host) return;
+  if(typeof THREE==="undefined"){ host.innerHTML="<div style=\"padding:20px;color:#888\">3D unavailable</div>"; return; }
+  var w=host.clientWidth||700, h=host.clientHeight||300;
+  var scene=new THREE.Scene(); scene.background=new THREE.Color(0xffffff);
+  var cam=new THREE.PerspectiveCamera(num(P.three&&P.three.cam_fov,40),w/h,0.1,5000);
+  var cp=(P.three&&P.three.cam_pos)||[60,40,90]; cam.position.set(cp[0]*2,cp[1]*2+20,cp[2]*2);
+  cam.lookAt(0,5,0);
+  var rend=new THREE.WebGLRenderer({antialias:true}); rend.setSize(w,h); host.innerHTML=""; host.appendChild(rend.domElement);
+  scene.add(new THREE.AmbientLight(0xffffff,num(P.three&&P.three.ambient_intensity,0.8)));
+  var dl=new THREE.DirectionalLight(0xffffff,num(P.three&&P.three.light_intensity,0.7)); dl.position.set(1,2,1); scene.add(dl);
+  var leftN=leftSpots.length,rightN=rightSpots.length,turnW=TURN>0?2:0; var totalUnits=leftN+rightN+turnW;
+  var UW=4, UH=3, UD=8; var gap=0.2;
+  var totalLen=totalUnits*(UW+gap);
+  var x=-totalLen/2;
+  function box(cx,cy,cz,sx,sy,sz,col,rot){ var g=new THREE.BoxGeometry(sx,sy,sz); var m=new THREE.MeshLambertMaterial({color:new THREE.Color(col)}); var mesh=new THREE.Mesh(g,m); mesh.position.set(cx,cy,cz); if(rot) mesh.rotation.y=Math.PI/2; scene.add(mesh); var eg=new THREE.LineSegments(new THREE.EdgesGeometry(g), new THREE.LineBasicMaterial({color:0x333333})); eg.position.copy(mesh.position); if(rot) eg.rotation.y=Math.PI/2; scene.add(eg); }
+  function stack3D(sp,cx,raise){ for(var t=0;t<TIERS;t++){ var cell=grid[sp][t]; if(!cell) continue; var cy=t*(UH+0.1)+UH/2+(raise||0); box(cx,cy,0,UW,UH,UD,colorFor(cell.code),false); } }
+  for(var i=0;i<leftN;i++){ var sp=leftSpots[i]; var d=leftN-1-i; var raise=0; stack3D(sp, x+UW/2, raise); x+=UW+gap; }
+  if(TURN>0){ var tcx=x+UW; for(var t=0;t<TIERS;t++){ var cell=grid[TURN][t]; if(!cell) continue; var cy=t*(UH+0.1)+UH/2; box(tcx,cy,0,UD,UH,UW*2,colorFor(cell.code),true); }
+    // red doorway wireframe
+    var dg=new THREE.BoxGeometry(UW*2+gap,TIERS*(UH+0.1)+1,UD+1); var de=new THREE.LineSegments(new THREE.EdgesGeometry(dg), new THREE.LineBasicMaterial({color:0xdd0000})); de.position.set(tcx,TIERS*(UH+0.1)/2,0); scene.add(de); x+=UW*2+gap; }
+  for(var j=0;j<rightN;j++){ var sp2=rightSpots[j]; var raise2=0; stack3D(sp2, x+UW/2, raise2); x+=UW+gap; }
+  // blue car bounding box
+  var cg=new THREE.BoxGeometry(totalLen+2,TIERS*(UH+0.1)+2,UD+2); var ce=new THREE.LineSegments(new THREE.EdgesGeometry(cg), new THREE.LineBasicMaterial({color:0x1f3b73})); ce.position.set(0,TIERS*(UH+0.1)/2,0); scene.add(ce);
+  rend.render(scene,cam);
+}
+try{ drawSide(); }catch(e){ console.error("drawSide",e); }
+try{ drawTop(); }catch(e){ console.error("drawTop",e); }
+try{ if(P.three&&P.three.enabled) draw3D(); }catch(e){ console.error("draw3D",e); }
 })();
-</script>
-
-</body>
-</html>
+</script></body></html>
 """
+
     html = HTML.replace("__PAYLOAD__", payload_json)
     components.html(html, height=height_px, scrolling=True)
+
+
+
 
 
 # =============================
