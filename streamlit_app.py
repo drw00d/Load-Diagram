@@ -1,5 +1,5 @@
 # streamlit_app.py
-# LoadXpert Route A — Presentation1 Rules Integrated
+# LoadXpert Route A - Presentation1 Rules Integrated
 #
 # Key behaviors:
 # - NORMAL doorway: 6/7/8/9 are independent 1-spot columns (but TOP labels in doorway render horizontal like PDF).
@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -29,8 +30,7 @@ import streamlit.components.v1 as components
 # =============================
 # Page
 # =============================
-st.set_page_config(page_title="Load Diagram Optimizer", layout="wide")
-st.title("Load Diagram Optimizer")
+st.set_page_config(page_title="LoadXpert Building Products", layout="wide")
 
 MASTER_PATH = "data/Ortec SP Product Master.xlsx"
 
@@ -530,10 +530,10 @@ def decide_strapping(percent_blocked: float) -> SecurementDecision:
     if x > 90.0:
         return SecurementDecision(x, False, "Straps: No", "(No cord strap required)")
     if x >= 50.0:
-        return SecurementDecision(x, True, "Straps: Yes — Double strapping", "Diagonal hatch = cord strap required (step-down)")
+        return SecurementDecision(x, True, "Straps: Yes - Double strapping", "Diagonal hatch = cord strap required (step-down)")
     if x >= 10.0:
-        return SecurementDecision(x, True, "Straps: Yes — 2-unit double strapping", "Diagonal hatch = cord strap required (step-down)")
-    return SecurementDecision(x, True, "Straps: Yes — 4-unit double strapping", "Diagonal hatch = cord strap required (step-down)")
+        return SecurementDecision(x, True, "Straps: Yes - 2-unit double strapping", "Diagonal hatch = cord strap required (step-down)")
+    return SecurementDecision(x, True, "Straps: Yes - 4-unit double strapping", "Diagonal hatch = cord strap required (step-down)")
 
 
 # =============================
@@ -1080,7 +1080,1006 @@ try{ if(P.three&&P.three.enabled) draw3D(); }catch(e){ console.error("draw3D",e)
     components.html(html, height=height_px, scrolling=True)
 
 
+# =============================
+# LoadXpert Building Products replica state + UI helpers
+# =============================
+BP_MODES = ["Centerbeam", "Van", "Flatbed", "Intermodal"]
+BP_VEHICLES = ["Centerbeam_WithRiser", "60 ft Plate F", "53 ft Dry Van", "48 ft Flatbed"]
+BP_SECUREMENTS = ["Standard BP Securement", "GrantLoading", "Airbag + Strap", "Dunnage/Blocker"]
+BP_JURISDICTIONS = ["US Rail", "US Highway", "Canada Rail", "Southeast Region", "West Region"]
+BP_DATA_SOURCES = ["MES Live", "Planning Sandbox", "Archived Loads"]
+BP_HISTORY = ["Today", "Last 7 days", "Last 30 days", "All history"]
 
+
+def apply_loadxpert_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        .block-container {padding-top: 1.4rem; padding-bottom: 2.5rem;}
+        [data-testid="stSidebar"] {background: #1f2933;}
+        [data-testid="stSidebar"] * {color: #f4f7fb;}
+        [data-testid="stSidebar"] .stSelectbox label,
+        [data-testid="stSidebar"] .stSlider label,
+        [data-testid="stSidebar"] .stNumberInput label,
+        [data-testid="stSidebar"] .stCheckbox label {color: #f4f7fb;}
+        .lx-topbar {
+            background: #202a33;
+            color: #fff;
+            padding: 14px 18px;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+        .lx-brand {font-size: 21px; font-weight: 700; letter-spacing: 0;}
+        .lx-subtle {font-size: 12px; color: #b8c2cc;}
+        .lx-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 9px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 700;
+            background: #e7f0ff;
+            color: #174ea6;
+            margin-right: 6px;
+            white-space: nowrap;
+        }
+        .lx-pill.green {background: #dff5e6; color: #17643a;}
+        .lx-pill.amber {background: #fff1cc; color: #855900;}
+        .lx-pill.red {background: #ffe0de; color: #a12a1f;}
+        .lx-panel {
+            border: 1px solid #d9e2ec;
+            border-radius: 8px;
+            padding: 14px 16px;
+            background: #fff;
+            margin-bottom: 12px;
+        }
+        .lx-section-title {font-size: 18px; font-weight: 700; margin: 2px 0 10px;}
+        .lx-meta-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(120px, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .lx-meta {
+            border: 1px solid #e4e9f0;
+            border-radius: 8px;
+            padding: 10px 12px;
+            background: #f8fafc;
+        }
+        .lx-meta .label {font-size: 11px; color: #627386; text-transform: uppercase;}
+        .lx-meta .value {font-size: 17px; color: #1f2933; font-weight: 700;}
+        .lx-scenario {
+            border: 1px solid #d9e2ec;
+            border-radius: 8px;
+            padding: 12px;
+            background: #fbfdff;
+            min-height: 130px;
+        }
+        .lx-scenario.accepted {border-color: #2f9e58; background: #f2fbf5;}
+        @media (max-width: 900px) {
+            .lx-topbar {display: block;}
+            .lx-meta-grid {grid-template-columns: repeat(2, minmax(120px, 1fr));}
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_topbar(page_label: str) -> None:
+    st.markdown(
+        f"""
+        <div class="lx-topbar">
+          <div>
+            <div class="lx-brand">LoadXpert Building Products</div>
+            <div class="lx-subtle">Planning board, optimization, securement, load-plan imaging, and dunnage workflow</div>
+          </div>
+          <div>
+            <span class="lx-pill green">GPBP</span>
+            <span class="lx-pill">Replica</span>
+            <span class="lx-pill amber">{page_label}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _first_product_ids(pm: pd.DataFrame, commodity: str, limit: int, offset: int = 0) -> List[str]:
+    df = pm.copy()
+    if COL_COMMODITY in df.columns and commodity:
+        scoped = df[df[COL_COMMODITY].astype(str).str.upper() == commodity.upper()].copy()
+        if not scoped.empty:
+            df = scoped
+    df = df.drop_duplicates(subset=[COL_PRODUCT_ID], keep="first").sort_values(COL_PRODUCT_ID)
+    ids = df[COL_PRODUCT_ID].astype(str).tolist()
+    if not ids:
+        return []
+    out: List[str] = []
+    for i in range(limit):
+        out.append(ids[(offset + i) % len(ids)])
+    return out
+
+
+def _make_lines(pm: pd.DataFrame, commodity: str, tiers: List[int], offset: int = 0) -> List[Dict[str, Any]]:
+    pids = _first_product_ids(pm, commodity, len(tiers), offset)
+    return [{"product_id": pid, "tiers": int(tier)} for pid, tier in zip(pids, tiers)]
+
+
+def build_demo_orders(pm: pd.DataFrame) -> List[Dict[str, Any]]:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return [
+        {
+            "id": 24051701,
+            "orderId": "BP-240517-001",
+            "batchId": "MES-517-A",
+            "destination": "Atlanta, GA",
+            "shipTo": "Southeast DC",
+            "weightRestriction": "286k GRL",
+            "carType": "Centerbeam",
+            "mode": "Centerbeam",
+            "grant": "Yes",
+            "vehicleName": "Centerbeam_WithRiser",
+            "securement": "GrantLoading",
+            "jurisdictionName": "US Rail",
+            "umlerInitial": "TBOX",
+            "umlerCarNumber": "632012",
+            "recordStatus": "New",
+            "accepted": False,
+            "createdAt": now,
+            "requestLines": _make_lines(pm, "PLY", [4, 4, 3, 2], 0),
+        },
+        {
+            "id": 24051702,
+            "orderId": "BP-240517-002",
+            "batchId": "MES-517-B",
+            "destination": "Dallas, TX",
+            "shipTo": "Southwest Yard",
+            "weightRestriction": "263k GRL",
+            "carType": "Centerbeam",
+            "mode": "Centerbeam",
+            "grant": "No",
+            "vehicleName": "60 ft Plate F",
+            "securement": "Standard BP Securement",
+            "jurisdictionName": "US Rail",
+            "umlerInitial": "TTGX",
+            "umlerCarNumber": "941220",
+            "recordStatus": "New",
+            "accepted": False,
+            "createdAt": now,
+            "requestLines": _make_lines(pm, "OSB", [5, 4, 4], 3),
+        },
+        {
+            "id": 24051703,
+            "orderId": "BP-240517-003",
+            "batchId": "MES-517-C",
+            "destination": "Charlotte, NC",
+            "shipTo": "Retail Pool",
+            "weightRestriction": "High cube van",
+            "carType": "Van",
+            "mode": "Van",
+            "grant": "No",
+            "vehicleName": "53 ft Dry Van",
+            "securement": "Airbag + Strap",
+            "jurisdictionName": "US Highway",
+            "umlerInitial": "",
+            "umlerCarNumber": "",
+            "recordStatus": "Planning",
+            "accepted": False,
+            "createdAt": now,
+            "requestLines": _make_lines(pm, "MDF", [3, 3, 2, 2], 7),
+        },
+        {
+            "id": 24051704,
+            "orderId": "BP-240517-004",
+            "batchId": "MES-517-D",
+            "destination": "Spokane, WA",
+            "shipTo": "West Reload",
+            "weightRestriction": "Mixed commodity",
+            "carType": "Flatbed",
+            "mode": "Flatbed",
+            "grant": "No",
+            "vehicleName": "48 ft Flatbed",
+            "securement": "Dunnage/Blocker",
+            "jurisdictionName": "West Region",
+            "umlerInitial": "",
+            "umlerCarNumber": "",
+            "recordStatus": "New",
+            "accepted": False,
+            "createdAt": now,
+            "requestLines": _make_lines(pm, "PB", [4, 3, 3], 2),
+        },
+    ]
+
+
+def ensure_replica_state(pm: pd.DataFrame) -> None:
+    if "bp_orders" not in st.session_state:
+        st.session_state.bp_orders = build_demo_orders(pm)
+    if "bp_workspace" not in st.session_state:
+        st.session_state.bp_workspace = "Planning Board"
+    if "bp_current_order_id" not in st.session_state and st.session_state.bp_orders:
+        st.session_state.bp_current_order_id = st.session_state.bp_orders[0]["id"]
+    if "bp_search" not in st.session_state:
+        st.session_state.bp_search = ""
+    if "bp_last_message" not in st.session_state:
+        st.session_state.bp_last_message = ""
+    if "bp_dunnage" not in st.session_state:
+        st.session_state.bp_dunnage = [
+            {"title": "9 in Airbag", "dunnageType": "airbag", "supplier": "LoadXpert", "category": "general"},
+            {"title": "Double Cord Strap", "dunnageType": "strap", "supplier": "LoadXpert", "category": "securement"},
+            {"title": '3" Honeycomb Void Fill', "dunnageType": "spacer", "supplier": "GP", "category": "void fill"},
+            {"title": "Doorway Blocker", "dunnageType": "blocker", "supplier": "GP", "category": "railcar"},
+        ]
+    if "bp_annotations" not in st.session_state:
+        st.session_state.bp_annotations = []
+
+
+def get_order_by_id(order_id: Optional[int]) -> Optional[Dict[str, Any]]:
+    for order in st.session_state.get("bp_orders", []):
+        if int(order["id"]) == int(order_id or -1):
+            return order
+    return None
+
+
+def current_order() -> Optional[Dict[str, Any]]:
+    return get_order_by_id(st.session_state.get("bp_current_order_id"))
+
+
+def products_for_lines(pm: pd.DataFrame, lines: List[Dict[str, Any]]) -> Tuple[Dict[str, Product], List[str]]:
+    products: Dict[str, Product] = {}
+    errors: List[str] = []
+    for line in lines:
+        pid = str(line.get("product_id", "")).strip()
+        if not pid:
+            continue
+        try:
+            products[pid] = lookup_product(pm, pid)
+        except Exception as exc:
+            errors.append(f"{pid}: {exc}")
+    return products, errors
+
+
+def request_lines_from_order(order: Dict[str, Any]) -> List[RequestLine]:
+    return [
+        RequestLine(product_id=str(line["product_id"]), tiers=int(line.get("tiers", 0)))
+        for line in order.get("requestLines", [])
+        if int(line.get("tiers", 0)) > 0
+    ]
+
+
+def run_order_optimization(
+    order: Dict[str, Any],
+    pm: pd.DataFrame,
+    *,
+    max_tiers: int,
+    turn_spot: int,
+    required_turn_tiers: int,
+    close_top_weight: int,
+    weight_balance_weight: int,
+    tg_safety_weight: int,
+    stagger_weight: int,
+) -> List[str]:
+    products, errors = products_for_lines(pm, order.get("requestLines", []))
+    if errors:
+        order["recordStatus"] = "Error"
+        return errors
+    requests = request_lines_from_order(order)
+    if not requests:
+        order["recordStatus"] = "Error"
+        return ["No load lines are available for this order."]
+
+    matrix, msgs = optimize_layout(
+        products=products,
+        requests=requests,
+        max_tiers=int(max_tiers),
+        turn_spot=int(turn_spot),
+        required_turn_tiers=int(required_turn_tiers),
+        close_top_weight=int(close_top_weight),
+        weight_balance_weight=int(weight_balance_weight),
+        tg_safety_weight=int(tg_safety_weight),
+        stagger_weight=int(stagger_weight),
+    )
+    order["matrix"] = matrix
+    order["turn_spot"] = int(turn_spot)
+    order["max_tiers"] = int(max_tiers)
+    order["recordStatus"] = "Optimized" if not msgs else "Optimized With Warnings"
+    order["optimizedAt"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    order["requestId"] = f"REQ-{order['id']}"
+    st.session_state.bp_current_order_id = order["id"]
+    return msgs
+
+
+def analyze_order(
+    order: Dict[str, Any],
+    pm: pd.DataFrame,
+    *,
+    A_deck: float,
+    B_empty_cg: float,
+    E_tare: float,
+    cg_limit_in: float,
+    C_override_val: Optional[float],
+) -> Tuple[Optional[AnalysisResult], Dict[str, Product], List[str]]:
+    products, errors = products_for_lines(pm, order.get("requestLines", []))
+    matrix = order.get("matrix")
+    if not matrix:
+        return None, products, errors
+    analysis = analyze_layout(
+        matrix=matrix,
+        products=products,
+        turn_spot=int(order.get("turn_spot", 7)),
+        A_deck=float(A_deck),
+        B_empty_cg=float(B_empty_cg),
+        E_tare=float(E_tare),
+        cg_limit_in=float(cg_limit_in),
+        override_C=(float(C_override_val) if C_override_val is not None else None),
+    )
+    return analysis, products, errors
+
+
+def order_summary(order: Dict[str, Any], pm: pd.DataFrame) -> Dict[str, Any]:
+    products, _ = products_for_lines(pm, order.get("requestLines", []))
+    tiers = sum(int(line.get("tiers", 0)) for line in order.get("requestLines", []))
+    weight = 0.0
+    for line in order.get("requestLines", []):
+        p = products.get(str(line.get("product_id")))
+        if p:
+            weight += p.unit_weight_lbs * int(line.get("tiers", 0))
+    return {"tiers": tiers, "weight": weight, "sku_count": len(order.get("requestLines", []))}
+
+
+def queue_dataframe(pm: pd.DataFrame, orders: List[Dict[str, Any]], search: str = "") -> pd.DataFrame:
+    rows = []
+    s = search.strip().lower()
+    for order in orders:
+        if s and s not in " ".join(
+            [
+                str(order.get("orderId", "")),
+                str(order.get("destination", "")),
+                str(order.get("shipTo", "")),
+                str(order.get("recordStatus", "")),
+            ]
+        ).lower():
+            continue
+        summary = order_summary(order, pm)
+        rows.append(
+            {
+                "Select": False,
+                "id": int(order["id"]),
+                "Order No's": order["orderId"],
+                "Destination": order["destination"],
+                "Weight Restriction": order["weightRestriction"],
+                "Mode": order["mode"],
+                "Grant": order["grant"],
+                "Vehicle": order["vehicleName"],
+                "Securement": order["securement"],
+                "Umler Initial": order["umlerInitial"],
+                "Umler Car No": order["umlerCarNumber"],
+                "Tiers": summary["tiers"],
+                "Est Weight": round(summary["weight"], 0),
+                "Status": order["recordStatus"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def sync_orders_from_editor(edited_df: pd.DataFrame) -> List[int]:
+    selected: List[int] = []
+    for row in edited_df.to_dict("records"):
+        order = get_order_by_id(int(row["id"]))
+        if not order:
+            continue
+        order["grant"] = str(row.get("Grant", order["grant"]))
+        order["vehicleName"] = str(row.get("Vehicle", order["vehicleName"]))
+        order["securement"] = str(row.get("Securement", order["securement"]))
+        order["umlerInitial"] = str(row.get("Umler Initial", order["umlerInitial"]))
+        order["umlerCarNumber"] = str(row.get("Umler Car No", order["umlerCarNumber"]))
+        if bool(row.get("Select", False)):
+            selected.append(int(order["id"]))
+    return selected
+
+
+def product_option_label(row: Dict[str, Any]) -> str:
+    pid = str(row.get(COL_PRODUCT_ID, "")).strip()
+    desc = str(row.get(COL_DESC, "")).strip()
+    edge = str(row.get(COL_EDGE, "")).strip()
+    wt = row.get(COL_UNIT_WT)
+    bits = [pid]
+    if pd.notna(wt):
+        bits.append(f"{float(wt):,.0f} lbs")
+    if edge:
+        bits.append(edge)
+    if desc:
+        bits.append(desc)
+    return " | ".join(bits)
+
+
+def status_badge(status: str) -> str:
+    normalized = str(status or "").lower()
+    css = "green" if "optimized" in normalized or "accepted" in normalized else "amber"
+    if "error" in normalized:
+        css = "red"
+    return f'<span class="lx-pill {css}">{status}</span>'
+
+
+def clean_securement_text(text: str) -> str:
+    value = str(text)
+    for token in (
+        "\u2014",
+        "\u2013",
+        "\u00e2\u20ac\u201d",
+        "\u00c3\u00a2\u00e2\u201a\u00ac\u00e2\u20ac\u009d",
+    ):
+        value = value.replace(token, "-")
+    return value
+
+
+def render_meta_grid(items: List[Tuple[str, str]]) -> None:
+    cells = "".join(
+        f'<div class="lx-meta"><div class="label">{label}</div><div class="value">{value}</div></div>'
+        for label, value in items
+    )
+    st.markdown(f'<div class="lx-meta-grid">{cells}</div>', unsafe_allow_html=True)
+
+
+def render_rule_metrics(analysis: AnalysisResult) -> None:
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("% Blocked", f"{analysis.securement.percent_blocked:.1f}%")
+    with c2:
+        st.metric("Securement", clean_securement_text(analysis.securement.strap_text))
+    with c3:
+        st.metric("CG above TOR", f"{analysis.cg_above_tor_in:.2f} in", analysis.cg_status)
+    with c4:
+        st.metric("Weight balance", f"{analysis.weight_balance_ratio * 100:.1f}%")
+
+
+
+
+# =============================
+# LoadXpert Building Products replica app
+# =============================
+try:
+    pm = load_product_master(MASTER_PATH)
+except Exception as e:
+    st.error(f"Could not load Product Master at '{MASTER_PATH}'. Error: {e}")
+    st.stop()
+
+ensure_replica_state(pm)
+apply_loadxpert_theme()
+
+if st.session_state.get("bp_workspace_pending"):
+    st.session_state.bp_workspace = st.session_state.pop("bp_workspace_pending")
+
+with st.sidebar:
+    st.header("LoadXpert")
+    workspace = st.radio(
+        "Workspace",
+        ["Planning Board", "Order Details", "Load Plan View", "Dunnage & Annotations"],
+        key="bp_workspace",
+        label_visibility="collapsed",
+    )
+
+    st.divider()
+    st.subheader("Planning Controls")
+    history_selected = st.selectbox("History", BP_HISTORY, index=1)
+    data_source_selected = st.selectbox("Data Source", BP_DATA_SOURCES, index=0)
+    mode_selected = st.selectbox("Mode", ["All Modes"] + BP_MODES, index=0)
+
+    st.divider()
+    st.subheader("Railcar Rules")
+    max_tiers = st.slider("Max tiers per spot", 1, 10, 4)
+    turn_spot = int(st.selectbox("Turn spot", ["7", "8"], index=0))
+    required_turn_tiers = st.slider("Turn tiers required", 0, int(max_tiers), int(max_tiers))
+
+    gap_labels = [f"{a}-{b}" for a, b in AIRBAG_ALLOWED_GAPS]
+    gap_choice_label = st.selectbox("Airbag location", gap_labels, index=1)
+    airbag_gap_choice = AIRBAG_ALLOWED_GAPS[gap_labels.index(gap_choice_label)]
+    airbag_gap_in = st.slider("Airbag space (in)", 6.0, 12.0, 9.0, 0.5)
+
+    st.divider()
+    st.subheader("Optimization Weights")
+    close_top_weight = st.slider("Close top", 0, 100, 20, 5)
+    weight_balance_weight = st.slider("Weight balance", 0, 100, 10, 5)
+    tg_safety_weight = st.slider("T&G safety", 0, 150, 50, 5)
+    stagger_weight = st.slider("Adjacent stagger", 0, 100, 25, 5)
+
+    st.divider()
+    st.subheader("Diagram Colors")
+    colA = st.color_picker("A fill", DEFAULT_CODE_COLORS["A"]["fill"])
+    colB = st.color_picker("B fill", DEFAULT_CODE_COLORS["B"]["fill"])
+    colC = st.color_picker("C fill", DEFAULT_CODE_COLORS["C"]["fill"])
+    code_colors = {
+        "A": {"fill": colA, "stroke": "#111111"},
+        "B": {"fill": colB, "stroke": "#111111"},
+        "C": {"fill": colC, "stroke": "#111111"},
+    }
+
+    hatch_angle_deg = float(DEFAULT_HATCH["angle_deg"])
+    hatch_spacing_px = float(DEFAULT_HATCH["spacing_px"])
+    hatch_alpha = float(DEFAULT_HATCH["alpha"])
+
+    st.divider()
+    st.subheader("CG Inputs")
+    A_deck = st.number_input("Deck height above TOR minus spring deflection (in)", min_value=0.0, value=48.0, step=0.1)
+    B_empty_cg = st.number_input("Empty car CG above TOR (in)", min_value=0.0, value=56.0, step=0.1)
+    E_tare = st.number_input("Tare weight (lbs)", min_value=1.0, value=75000.0, step=100.0)
+    cg_limit_in = st.number_input("CG limit above TOR (in)", min_value=1.0, value=98.0, step=0.5)
+    override_C = st.checkbox("Override load CG above deck", value=False)
+    C_override_val: Optional[float] = None
+    if override_C:
+        C_override_val = st.number_input("Load CG above deck (in)", min_value=0.0, value=30.0, step=0.5)
+
+show_3d = True
+show_edges = True
+cam_fov = 42.0
+cam_x = 10.0
+cam_y = 10.0
+cam_z = 18.0
+light_intensity = 1.2
+ambient_intensity = 0.65
+flip_side = False
+
+render_topbar(workspace)
+
+orders = st.session_state.bp_orders
+filtered_orders = orders if mode_selected == "All Modes" else [o for o in orders if o["mode"] == mode_selected]
+
+if st.session_state.bp_last_message:
+    st.success(st.session_state.bp_last_message)
+
+render_meta_grid(
+    [
+        ("Product Master", f"{len(pm):,} SKUs"),
+        ("Source", data_source_selected),
+        ("History", history_selected),
+        ("Active Orders", str(len(filtered_orders))),
+    ]
+)
+
+if workspace == "Planning Board":
+    st.markdown('<div class="lx-section-title">Building Products Planning Tool</div>', unsafe_allow_html=True)
+    top_a, top_b, top_c, top_d = st.columns([2.2, 1, 1, 1], vertical_alignment="bottom")
+    with top_a:
+        st.session_state.bp_search = st.text_input("Order search", value=st.session_state.bp_search)
+    with top_b:
+        soft_search = st.button("Soft Search", width="stretch")
+    with top_c:
+        hard_refresh = st.button("Hard Refresh", width="stretch")
+    with top_d:
+        reset_board = st.button("Reset", width="stretch")
+
+    if hard_refresh:
+        st.session_state.bp_orders = build_demo_orders(pm)
+        st.session_state.bp_last_message = "Planning board refreshed from the local MES-style demo feed."
+        st.rerun()
+    if reset_board:
+        st.session_state.bp_search = ""
+        st.session_state.bp_last_message = "Filters cleared."
+        st.rerun()
+    if soft_search:
+        st.session_state.bp_last_message = "Soft search applied."
+
+    queue_df = queue_dataframe(pm, filtered_orders, st.session_state.bp_search)
+    if queue_df.empty:
+        st.info("No Building Products orders match the current filters.")
+    else:
+        edited_df = st.data_editor(
+            queue_df,
+            width="stretch",
+            hide_index=True,
+            height=360,
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select"),
+                "Grant": st.column_config.SelectboxColumn("Grant", options=["Yes", "No"]),
+                "Vehicle": st.column_config.SelectboxColumn("Vehicle", options=BP_VEHICLES),
+                "Securement": st.column_config.SelectboxColumn("Securement", options=BP_SECUREMENTS),
+                "id": st.column_config.NumberColumn("ID", disabled=True),
+                "Est Weight": st.column_config.NumberColumn("Est Weight", format="%.0f"),
+            },
+            disabled=[
+                "id",
+                "Order No's",
+                "Destination",
+                "Weight Restriction",
+                "Mode",
+                "Tiers",
+                "Est Weight",
+                "Status",
+            ],
+            key="bp_queue_editor",
+        )
+        selected_ids = sync_orders_from_editor(edited_df)
+
+        act_a, act_b, act_c, act_d = st.columns([1.1, 1.1, 1.1, 2], vertical_alignment="center")
+        with act_a:
+            if st.button("Optimize Selected", type="primary", width="stretch", disabled=not selected_ids):
+                all_msgs: List[str] = []
+                for oid in selected_ids:
+                    order = get_order_by_id(oid)
+                    if order:
+                        all_msgs.extend(
+                            run_order_optimization(
+                                order,
+                                pm,
+                                max_tiers=int(max_tiers),
+                                turn_spot=int(turn_spot),
+                                required_turn_tiers=int(required_turn_tiers),
+                                close_top_weight=int(close_top_weight),
+                                weight_balance_weight=int(weight_balance_weight),
+                                tg_safety_weight=int(tg_safety_weight),
+                                stagger_weight=int(stagger_weight),
+                            )
+                        )
+                st.session_state.bp_last_message = f"Optimized {len(selected_ids)} order(s)."
+                if all_msgs:
+                    st.session_state.bp_last_message += f" {len(all_msgs)} warning(s) recorded."
+                st.rerun()
+        with act_b:
+            if st.button("Open Details", width="stretch", disabled=not selected_ids):
+                st.session_state.bp_current_order_id = selected_ids[0]
+                st.session_state.bp_workspace_pending = "Order Details"
+                st.session_state.bp_last_message = "Selected order opened in details."
+                st.rerun()
+        with act_c:
+            if st.button("View Load Plan", width="stretch", disabled=not selected_ids):
+                st.session_state.bp_current_order_id = selected_ids[0]
+                st.session_state.bp_workspace_pending = "Load Plan View"
+                st.session_state.bp_last_message = "Selected order opened in load-plan view."
+                st.rerun()
+        with act_d:
+            st.caption(f"{len(selected_ids)} selected" if selected_ids else "Select one or more orders in the grid.")
+
+    st.markdown('<div class="lx-section-title">Status Board</div>', unsafe_allow_html=True)
+    status_rows = []
+    for order in filtered_orders:
+        analysis, _, _ = analyze_order(
+            order,
+            pm,
+            A_deck=A_deck,
+            B_empty_cg=B_empty_cg,
+            E_tare=E_tare,
+            cg_limit_in=cg_limit_in,
+            C_override_val=C_override_val,
+        )
+        status_rows.append(
+            {
+                "Order": order["orderId"],
+                "Status": order["recordStatus"],
+                "Payload": round(analysis.payload_lbs, 0) if analysis else None,
+                "Blocked %": round(analysis.securement.percent_blocked, 1) if analysis else None,
+                "CG": analysis.cg_status if analysis else "",
+                "Accepted": "Yes" if order.get("accepted") else "No",
+            }
+        )
+    st.dataframe(pd.DataFrame(status_rows), width="stretch", hide_index=True)
+
+elif workspace == "Order Details":
+    order = current_order()
+    if not order:
+        st.warning("Choose an order on the planning board first.")
+        st.stop()
+
+    st.markdown(
+        f'<div class="lx-section-title">Order - {order["orderId"]} {status_badge(order["recordStatus"])}</div>',
+        unsafe_allow_html=True,
+    )
+
+    detail_a, detail_b, detail_c, detail_d = st.columns(4)
+    with detail_a:
+        order["jurisdictionName"] = st.selectbox(
+            "Jurisdiction",
+            BP_JURISDICTIONS,
+            index=BP_JURISDICTIONS.index(order["jurisdictionName"]) if order["jurisdictionName"] in BP_JURISDICTIONS else 0,
+        )
+    with detail_b:
+        order["securement"] = st.selectbox(
+            "Securement",
+            BP_SECUREMENTS,
+            index=BP_SECUREMENTS.index(order["securement"]) if order["securement"] in BP_SECUREMENTS else 0,
+        )
+    with detail_c:
+        order["vehicleName"] = st.selectbox(
+            "Vehicle",
+            BP_VEHICLES,
+            index=BP_VEHICLES.index(order["vehicleName"]) if order["vehicleName"] in BP_VEHICLES else 0,
+        )
+    with detail_d:
+        order["grant"] = st.selectbox("Grant", ["Yes", "No"], index=0 if order["grant"] == "Yes" else 1)
+
+    um_a, um_b, um_c = st.columns([1, 1, 2])
+    with um_a:
+        order["umlerInitial"] = st.text_input("Umler Initial", value=order.get("umlerInitial", ""))
+    with um_b:
+        order["umlerCarNumber"] = st.text_input("Umler Car Number", value=order.get("umlerCarNumber", ""))
+    with um_c:
+        st.caption(f"Destination: {order['destination']} | Ship To: {order['shipTo']} | Batch: {order['batchId']}")
+
+    products, product_errors = products_for_lines(pm, order.get("requestLines", []))
+    for err in product_errors:
+        st.error(err)
+
+    line_rows = []
+    for line in order.get("requestLines", []):
+        product = products.get(str(line["product_id"]))
+        line_rows.append(
+            {
+                "Sales Product Id": line["product_id"],
+                "Description": product.description if product else "",
+                "Edge": product.edge_type if product else "",
+                "Unit Weight": product.unit_weight_lbs if product else None,
+                "Tiers": int(line.get("tiers", 0)),
+                "T&G": bool(product.is_tg) if product else False,
+            }
+        )
+    st.dataframe(pd.DataFrame(line_rows), width="stretch", hide_index=True, height=220)
+
+    with st.expander("Add product line", expanded=False):
+        commodities = sorted(pm[COL_COMMODITY].dropna().astype(str).unique().tolist())
+        add_c1, add_c2, add_c3 = st.columns([1, 2.6, 0.8], vertical_alignment="bottom")
+        with add_c1:
+            add_commodity = st.selectbox("Commodity", commodities, key="detail_add_commodity")
+        add_df = pm[pm[COL_COMMODITY].astype(str) == str(add_commodity)].copy()
+        add_df = add_df.drop_duplicates(subset=[COL_PRODUCT_ID], keep="first").sort_values(COL_PRODUCT_ID).head(1000)
+        add_options = add_df.to_dict("records")
+        add_labels = [product_option_label(row) for row in add_options]
+        with add_c2:
+            add_label = st.selectbox("Product", add_labels, key="detail_add_product") if add_labels else None
+        with add_c3:
+            add_tiers = st.number_input("Tiers", min_value=1, max_value=10, value=2, key="detail_add_tiers")
+        if st.button("Add Line", disabled=not add_label):
+            selected = add_options[add_labels.index(add_label)]
+            order["requestLines"].append({"product_id": str(selected[COL_PRODUCT_ID]), "tiers": int(add_tiers)})
+            st.session_state.bp_last_message = "Product line added."
+            st.rerun()
+
+    det_a, det_b, det_c, det_d = st.columns([1, 1, 1, 2])
+    with det_a:
+        if st.button("Optimize", type="primary", width="stretch"):
+            msgs = run_order_optimization(
+                order,
+                pm,
+                max_tiers=int(max_tiers),
+                turn_spot=int(turn_spot),
+                required_turn_tiers=int(required_turn_tiers),
+                close_top_weight=int(close_top_weight),
+                weight_balance_weight=int(weight_balance_weight),
+                tg_safety_weight=int(tg_safety_weight),
+                stagger_weight=int(stagger_weight),
+            )
+            st.session_state.bp_last_message = "Order optimized." + (f" {len(msgs)} warning(s)." if msgs else "")
+            st.rerun()
+    with det_b:
+        if st.button("Reset", width="stretch"):
+            order.pop("matrix", None)
+            order["recordStatus"] = "Planning"
+            order["accepted"] = False
+            st.session_state.bp_last_message = "Order reset to planning."
+            st.rerun()
+    with det_c:
+        if st.button("Accept Scenario", width="stretch", disabled="matrix" not in order):
+            order["accepted"] = True
+            order["recordStatus"] = "Accepted"
+            st.session_state.bp_last_message = "Scenario accepted."
+            st.rerun()
+    with det_d:
+        if st.button("Open Load Plan View", width="stretch", disabled="matrix" not in order):
+            st.session_state.bp_workspace_pending = "Load Plan View"
+            st.session_state.bp_last_message = "Load plan ready."
+            st.rerun()
+
+    analysis, _, _ = analyze_order(
+        order,
+        pm,
+        A_deck=A_deck,
+        B_empty_cg=B_empty_cg,
+        E_tare=E_tare,
+        cg_limit_in=cg_limit_in,
+        C_override_val=C_override_val,
+    )
+    if analysis:
+        st.markdown('<div class="lx-section-title">Scenarios</div>', unsafe_allow_html=True)
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            st.markdown(
+                f"""
+                <div class="lx-scenario">
+                  <b>Base Case</b><br>
+                  Payload: {analysis.payload_lbs:,.0f} lbs<br>
+                  Blocked: {analysis.securement.percent_blocked:.1f}%<br>
+                  CG: {analysis.cg_status}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with s2:
+            st.markdown(
+                f"""
+                <div class="lx-scenario {'accepted' if order.get('accepted') else ''}">
+                  <b>Advise Case</b><br>
+                  Vehicle: {order['vehicleName']}<br>
+                  Securement: {order['securement']}<br>
+                  {clean_securement_text(analysis.securement.strap_text)}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with s3:
+            honeycomb = "Required" if analysis.honeycomb_required else "Not required"
+            st.markdown(
+                f"""
+                <div class="lx-scenario">
+                  <b>Securement Notes</b><br>
+                  Honeycomb: {honeycomb}<br>
+                  Hatched spots: {", ".join(map(str, analysis.hatched_spots)) or "None"}<br>
+                  Balance: {analysis.weight_balance_ratio * 100:.1f}%
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        render_rule_metrics(analysis)
+    else:
+        st.info("Optimize this order to create scenarios and load-plan outputs.")
+
+elif workspace == "Load Plan View":
+    order = current_order()
+    if not order:
+        st.warning("Choose an order on the planning board first.")
+        st.stop()
+    analysis, products, errors = analyze_order(
+        order,
+        pm,
+        A_deck=A_deck,
+        B_empty_cg=B_empty_cg,
+        E_tare=E_tare,
+        cg_limit_in=cg_limit_in,
+        C_override_val=C_override_val,
+    )
+    st.markdown(
+        f'<div class="lx-section-title">Load Plan - {order["orderId"]} {status_badge(order["recordStatus"])}</div>',
+        unsafe_allow_html=True,
+    )
+    for err in errors:
+        st.error(err)
+    if not analysis or "matrix" not in order:
+        st.info("Optimize the selected order before opening the load-plan image set.")
+    else:
+        render_meta_grid(
+            [
+                ("Vehicle", order["vehicleName"]),
+                ("Reference", order["requestId"]),
+                ("Payload", f"{analysis.payload_lbs:,.0f} lbs"),
+                ("Securement", clean_securement_text(analysis.securement.strap_text)),
+            ]
+        )
+        selected_views = st.multiselect(
+            "Views",
+            ["3D Top and Side", "3D View", "3D Left and Right", "2D View", "2D Side and Top", "2D Axle Load"],
+            default=["3D Top and Side", "2D Side and Top", "2D Axle Load"],
+        )
+        render_rule_metrics(analysis)
+
+        if analysis.honeycomb_required:
+            st.warning(f'3" honeycomb dunnage required at spot(s): {", ".join(map(str, analysis.honeycomb_spots))}')
+        if analysis.hatched_spots:
+            st.info(f"Cord strap hatch marks at spot(s): {', '.join(map(str, analysis.hatched_spots))}")
+
+        render_routeA_component(
+            page_title="Top + Side View (Building Products)",
+            created_by="LoadXpert Replica",
+            created_at=order.get("optimizedAt", datetime.now().strftime("%Y-%m-%d %H:%M")),
+            order_number=order["orderId"],
+            vehicle_number=order["vehicleName"],
+            po_number=order["batchId"],
+            car_id=(order.get("umlerInitial", "") + order.get("umlerCarNumber", "")).strip() or "UNASSIGNED",
+            matrix=order["matrix"],
+            products=products,
+            turn_spot=int(order.get("turn_spot", 7)),
+            airbag_gap_choice=airbag_gap_choice,
+            airbag_gap_in=float(airbag_gap_in),
+            analysis=analysis,
+            code_colors=code_colors,
+            hatch_angle_deg=float(hatch_angle_deg),
+            hatch_spacing_px=float(hatch_spacing_px),
+            hatch_alpha=float(hatch_alpha),
+            show_3d=bool(any(v.startswith("3D") for v in selected_views)),
+            show_edges=bool(show_edges),
+            cam_fov=float(cam_fov),
+            cam_pos=(float(cam_x), float(cam_y), float(cam_z)),
+            light_intensity=float(light_intensity),
+            ambient_intensity=float(ambient_intensity),
+            flip_side=bool(flip_side),
+            height_px=1040,
+        )
+
+        cargo_rows = []
+        for line in order.get("requestLines", []):
+            product = products.get(str(line["product_id"]))
+            cargo_rows.append(
+                {
+                    "Order": order["orderId"],
+                    "Product": line["product_id"],
+                    "Description": product.description if product else "",
+                    "Tiers": int(line["tiers"]),
+                    "Unit Weight": product.unit_weight_lbs if product else 0,
+                    "Total Weight": (product.unit_weight_lbs * int(line["tiers"])) if product else 0,
+                }
+            )
+        cargo_df = pd.DataFrame(cargo_rows)
+        st.download_button(
+            "Download Loaded Cargo CSV",
+            cargo_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"{order['orderId']}_loaded_cargo.csv",
+            mime="text/csv",
+        )
+        st.dataframe(cargo_df, width="stretch", hide_index=True)
+
+else:
+    st.markdown('<div class="lx-section-title">Dunnage Manager</div>', unsafe_allow_html=True)
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        filter_type = st.selectbox("Dunnage Type", ["All"] + sorted({d["dunnageType"] for d in st.session_state.bp_dunnage}))
+    with d2:
+        filter_category = st.selectbox("Category", ["All"] + sorted({d["category"] for d in st.session_state.bp_dunnage}))
+    with d3:
+        supplier = st.text_input("Supplier", value="")
+
+    filtered_dunnage = []
+    for item in st.session_state.bp_dunnage:
+        if filter_type != "All" and item["dunnageType"] != filter_type:
+            continue
+        if filter_category != "All" and item["category"] != filter_category:
+            continue
+        if supplier and supplier.lower() not in item["supplier"].lower():
+            continue
+        filtered_dunnage.append(item)
+
+    cols = st.columns(4)
+    for idx, item in enumerate(filtered_dunnage):
+        with cols[idx % 4]:
+            st.markdown(
+                f"""
+                <div class="lx-panel">
+                  <span class="lx-pill">{item['dunnageType']}</span>
+                  <div style="font-size:32px; line-height:1.4;">AIR</div>
+                  <b>{item['title']}</b><br>
+                  <span class="lx-subtle">{item['supplier']} | {item['category']}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown('<div class="lx-section-title">Annotations</div>', unsafe_allow_html=True)
+    order = current_order()
+    ann_a, ann_b, ann_c = st.columns([1.2, 1, 2])
+    with ann_a:
+        ann_category = st.selectbox("Category", ["general", "airbag", "issue", "load"])
+    with ann_b:
+        ann_view = st.selectbox("View", ["3d-split", "2d-axle-load", "2d-side-top"])
+    with ann_c:
+        ann_text = st.text_input("Description", value="")
+    if st.button("Save Annotation", disabled=not ann_text):
+        st.session_state.bp_annotations.append(
+            {
+                "order": order["orderId"] if order else "Unassigned",
+                "category": ann_category,
+                "view": ann_view,
+                "text": ann_text,
+                "createdAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
+        )
+        st.session_state.bp_last_message = "Annotation saved."
+        st.rerun()
+
+    if st.session_state.bp_annotations:
+        st.dataframe(pd.DataFrame(st.session_state.bp_annotations), width="stretch", hide_index=True)
+    else:
+        st.info("No annotations saved yet.")
+
+st.stop()
 
 
 # =============================
@@ -1104,11 +2103,11 @@ with st.sidebar:
     st.header("Settings")
 
     page_title = st.text_input("Page title", value="Top + Side View (Route A)")
-    created_by = st.text_input("Created By", value="—")
-    created_at = st.text_input("Created At", value="—")
-    order_number = st.text_input("Order Number", value="—")
-    vehicle_number = st.text_input("Vehicle Number", value="—")
-    po_number = st.text_input("PO Number", value="—")
+    created_by = st.text_input("Created By", value="-")
+    created_at = st.text_input("Created At", value="-")
+    order_number = st.text_input("Order Number", value="-")
+    vehicle_number = st.text_input("Vehicle Number", value="-")
+    po_number = st.text_input("PO Number", value="-")
     car_id = st.text_input("Car ID", value="TBOX632012")
 
     st.divider()
@@ -1255,7 +2254,7 @@ if st.session_state.requests:
     for r in st.session_state.requests:
         p = products.get(r.product_id)
         rows.append({"Sales Product Id": r.product_id, "Description": p.description if p else "", "Tiers": r.tiers, "T&G?": (p.is_tg if p else False)})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=240)
+    st.dataframe(pd.DataFrame(rows), width="stretch", height=240)
 else:
     st.info("Add one or more SKUs, then click Optimize Layout and Render Diagram.")
 
@@ -1298,7 +2297,7 @@ a1, a2, a3, a4 = st.columns(4)
 with a1:
     st.metric("% Blocked (proxy)", f"{analysis.securement.percent_blocked:.1f}%")
 with a2:
-    st.metric("Securement", analysis.securement.strap_text)
+    st.metric("Securement", clean_securement_text(analysis.securement.strap_text))
 with a3:
     st.metric("CG above TOR (in)", f"{analysis.cg_above_tor_in:.2f} ({analysis.cg_status})")
 with a4:
