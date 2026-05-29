@@ -856,209 +856,348 @@ def render_routeA_component(
     payload_json = json.dumps(payload)
 
     HTML = r"""
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8" />
+<meta charset="utf-8"/>
 <style>
-  body { margin:0; padding:0; background:#ffffff; font-family:Helvetica, Arial, sans-serif; color:#111; }
-  .app { padding:10px 14px; }
-  .hdr { display:flex; flex-wrap:wrap; gap:18px 28px; align-items:center; border-bottom:2px solid #111; padding-bottom:8px; margin-bottom:10px; font-size:13px; }
-  .hdr b { color:#1565c0; }
-  .layout { display:flex; flex-direction:row; gap:14px; align-items:flex-start; }
-  .leftcol { width:300px; flex:0 0 300px; }
-  .midcol { flex:1 1 auto; min-width:0; }
-  .panel { border:1px solid #bbb; border-radius:4px; margin-bottom:12px; }
-  .panel h3 { margin:0; padding:6px 8px; font-size:14px; background:#f2f2f2; border-bottom:1px solid #ccc; }
-  table { border-collapse:collapse; width:100%; font-size:12px; }
-  .settings td { border:1px solid #ddd; padding:5px 7px; }
-  .settings td.k { background:#eef3f7; width:46%; font-weight:600; }
-  .lines th, .lines td { border:1px solid #ccc; padding:5px 6px; text-align:left; }
-  .lines th { background:#f2f2f2; }
-  .views { display:flex; flex-direction:column; gap:10px; }
-  .viewrow { display:flex; flex-direction:row; gap:12px; align-items:flex-start; }
-  .v3d { flex:0 0 46%; }
-  .vstack { flex:1 1 auto; display:flex; flex-direction:column; gap:10px; min-width:0; }
-  .vtitle { text-align:center; font-weight:700; font-size:14px; margin:2px 0; }
-  canvas { background:#fff; }
-  #three { width:100%; height:300px; border:1px solid #ddd; }
-  #cTop, #cSide { width:100%; height:auto; border:1px solid #eee; }
-  .items th, .items td { border:1px solid #bbb; padding:4px 7px; font-size:12px; text-align:left; }
-  .items th { background:#eef3f7; }
-  .reset { margin:8px; padding:6px 16px; background:#e53935; color:#fff; border:none; border-radius:18px; font-weight:600; }
+  * { box-sizing: border-box; }
+  html,body { margin:0; padding:0; background:#ffffff; font-family: Arial, Helvetica, sans-serif; color:#222; }
+  .root { width:100%; padding:8px 10px 14px 10px; }
+  .hdrstrip { display:flex; justify-content:space-between; align-items:center; gap:18px;
+    font-size:13px; padding:6px 4px; border-bottom:1px solid #cfcfcf; margin-bottom:6px; }
+  .hdrstrip .lab { color:#222; }
+  .hdrstrip .val { color:#1f6fb2; font-weight:bold; }
+  .layout { display:flex; gap:10px; align-items:stretch; }
+  .leftcol { width:34%; min-width:300px; }
+  .rightcol { flex:1; display:flex; flex-direction:column; gap:8px; }
+  .panel { border:1px solid #d0d0d0; border-radius:4px; padding:8px 10px; margin-bottom:10px; }
+  .panel h3 { margin:0 0 8px 0; font-size:15px; font-weight:bold; }
+  table.settings { width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.settings td { border:1px solid #d8d8d8; padding:5px 8px; }
+  table.settings td.k { background:#f3f3f3; width:40%; color:#333; }
+  .viewbox { border:1px solid #e2e2e2; border-radius:4px; padding:4px; }
+  .viewtitle { text-align:center; font-size:15px; font-weight:bold; margin:2px 0 4px 0; }
+  canvas { display:block; }
+  .footer { border-top:1px solid #c9c9c9; margin-top:8px; padding-top:6px; font-size:12.5px; }
+  .footrow { display:flex; justify-content:space-between; gap:14px; padding:2px 4px; }
+  .footrow .cell { white-space:nowrap; }
+  .footrow b { font-weight:bold; }
+  .legend { display:flex; gap:30px; font-size:11px; color:#1f7a1f; margin-top:6px; align-items:flex-start; }
+  .legend .lg { display:flex; gap:6px; align-items:flex-start; max-width:30%; }
+  table.items { width:100%; border-collapse:collapse; font-size:12px; margin-top:6px; }
+  table.items td, table.items th { border:1px solid #cfcfcf; padding:3px 6px; text-align:left; }
+  table.items td.k { background:#f3f3f3; font-weight:bold; width:18%; }
+  .swatch { display:inline-block; width:34px; height:14px; vertical-align:middle; }
 </style>
 </head>
 <body>
-<div class="app">
-  <div class="hdr" id="hdr"></div>
+<div class="root">
+
+  <div class="hdrstrip">
+    <div><span class="lab">Payload : </span><span class="val" id="h_payload"></span></div>
+    <div><span class="lab">MaxPayload : </span><span class="val" id="h_maxpay"></span></div>
+    <div><span class="lab">Volume % : </span><span class="val" id="h_vol"></span></div>
+    <div><span class="lab">Weight % : </span><span class="val" id="h_wt"></span></div>
+  </div>
+
   <div class="layout">
     <div class="leftcol">
-      <div class="panel"><h3>Optimization Settings</h3>
-        <table class="settings" id="settingsTbl"></table>
+      <div class="panel">
+        <h3>Optimization Settings :</h3>
+        <table class="settings" id="tbl_settings"></table>
       </div>
-      <div class="panel"><h3>Load Lines</h3>
-        <table class="lines" id="linesTbl"></table>
-        <button class="reset" type="button">Reset</button>
+      <div class="panel">
+        <table class="items" id="tbl_lines"></table>
       </div>
     </div>
-    <div class="midcol">
-      <div class="views">
-        <div class="viewrow">
-          <div class="v3d">
-            <div class="vtitle">3D</div>
-            <canvas id="three" width="560" height="300"></canvas>
-          </div>
-          <div class="vstack">
-            <div><div class="vtitle">Top</div><canvas id="cTop" width="1100" height="190"></canvas></div>
-            <div><div class="vtitle">Side1</div><canvas id="cSide" width="1100" height="230"></canvas></div>
-          </div>
-        </div>
-        <div class="panel"><h3>Item Detail</h3>
-          <table class="items" id="itemsTbl"></table>
-        </div>
+
+    <div class="rightcol">
+      <div class="viewbox">
+        <div class="viewtitle">3D</div>
+        <div id="three" style="width:100%;height:300px;"></div>
+      </div>
+      <div class="viewbox">
+        <div class="viewtitle">Top</div>
+        <canvas id="cvTop" width="1000" height="150"></canvas>
+      </div>
+      <div class="viewbox">
+        <div class="viewtitle">Side1</div>
+        <canvas id="cvSide" width="1000" height="220"></canvas>
       </div>
     </div>
   </div>
+
+  <div class="footer">
+    <div class="footrow">
+      <div class="cell">Floor spots&nbsp; = <b id="f_spots"></b></div>
+      <div class="cell">C.G. height&nbsp; = <b id="f_cg"></b> (in)</div>
+      <div class="cell">Airbag Space&nbsp; = <b id="f_airbag"></b> (in)</div>
+      <div class="cell">Whole Unit Equivalent&nbsp; = <b id="f_wue"></b></div>
+    </div>
+    <div class="footrow">
+      <div class="cell">Secure Loads from:&nbsp; <span class="swatch" id="sw_diag"></span> sliding&nbsp;&nbsp; <span class="swatch" id="sw_vert"></span> tipping &amp; sliding</div>
+      <div class="cell">Total LISA Units&nbsp; = <b id="f_lisa"></b></div>
+    </div>
+    <table class="items" id="tbl_items"></table>
+    <div class="legend" id="legend"></div>
+  </div>
 </div>
+
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
 <script>
-const DATA = __PAYLOAD__;
-const M = DATA.meta;
-const COLORS = DATA.colors;
-const CELLS = DATA.cells;
-const REP = DATA.rep;
-const ITEMS = DATA.items;
-function colFill(code){ return (COLORS[code] && COLORS[code].fill) || '#79C7C7'; }
-function colStroke(code){ return (COLORS[code] && COLORS[code].stroke) || '#111'; }
-function n0(x){ return (x==null)? '\u2014' : Math.round(x).toLocaleString(); }
-function n2(x){ return (x==null)? '\u2014' : Number(x).toFixed(2); }
-// ---- Header strip ----
-document.getElementById('hdr').innerHTML =
-  '<span>Payload : <b>'+n0(M.payload_lbs)+'</b></span>'+
-  '<span>MaxPayload : <b>'+n0(M.max_payload_lbs)+'</b></span>'+
-  '<span>Volume % : <b>'+Math.round(M.volume_pct)+'</b></span>'+
-  '<span>Weight % : <b>'+Math.round(M.weight_pct)+'</b></span>'+
-  '<span>Vehicle : <b>'+(M.vehicle_number||'\u2014')+'</b></span>'+
-  '<span>Car : <b>'+(M.car_id||'\u2014')+'</b></span>'+
-  '<span>CG : <b>'+n2(M.cg_in)+' ('+M.cg_status+')</b></span>';// ---- Settings table ----
-var srows = [
-  ['Jurisdiction', M.order_number || '\u2014'],
-  ['Securement', M.securement_text || '\u2014'],
-  ['Vehicle', M.vehicle_number || '\u2014'],
-  ['Page', M.page_title || '\u2014'],
-  ['Car ID', M.car_id || '\u2014'],
-  ['Turn spot', String(M.turn_spot)],
-  ['Floor spots', String(M.spots)],
-  ['Total units', String(M.total_units)]
-];
-document.getElementById('settingsTbl').innerHTML = srows.map(function(r){
-  return '<tr><td class="k">'+r[0]+'</td><td>'+r[1]+'</td></tr>'; }).join('');
-// ---- Load lines table ----
-var lh = '<tr><th>#</th><th>Description</th><th>Qty</th><th>Wt</th></tr>';
-var lb = ITEMS.map(function(it,i){
-  return '<tr><td>'+(i+1)+'</td><td>'+it.id+'<br><small>'+(it.name||'')+'</small></td><td>'+it.qty+'</td><td>'+n0(it.wt)+'</td></tr>'; }).join('');
-document.getElementById('linesTbl').innerHTML = lh+lb;
-// ---- Item detail table ----
-var ih = '<tr><th>Code</th><th>Qty</th><th>Name/SKU</th><th>Product Id</th><th>Size (LxWxH)</th><th>Unit Wt</th></tr>';
-var ib = ITEMS.map(function(it){
-  var sz = n2(it.L)+' x '+n2(it.W)+' x '+n2(it.H);
-  return '<tr><td>'+it.code+'</td><td>'+it.qty+'</td><td>'+(it.name||'')+'</td><td>'+it.id+'</td><td>'+sz+'</td><td>'+n0(it.wt)+'</td></tr>'; }).join('');
-document.getElementById('itemsTbl').innerHTML = ih+ib;// ---- 2D drawing helpers ----
-var SP = M.spots, TI = M.tiers || 4;
-function spotCode(s){ var p = REP[s]; if(!p) return null; for(var i=0;i<CELLS.length;i++){ if(CELLS[i].spot==s) return CELLS[i].code; } return 'A'; }
-function tiersAt(s){ var c=0; for(var i=0;i<CELLS.length;i++){ if(CELLS[i].spot==s) c++; } return c; }
-function inDoor(s){ return s>=M.door_start && s<=M.door_end; }
-function inTurn(s){ return s==M.turn_spot || s==M.blocked_spot; }
-// ---- TOP VIEW ----
 (function(){
-  var cv=document.getElementById('cTop'), ctx=cv.getContext('2d');
-  var W=cv.width, H=cv.height; ctx.clearRect(0,0,W,H);
-  var padL=10, padR=10, top=24, bot=24;
-  var usableW=W-padL-padR; var sw=usableW/SP; var ch=H-top-bot;
-  // outer car
-  ctx.strokeStyle='#1f3b8c'; ctx.lineWidth=2; ctx.strokeRect(padL,top,usableW,ch);
-  ctx.font='bold 12px Helvetica'; ctx.textAlign='center'; ctx.textBaseline='middle';
-  for(var s=1;s<=SP;s++){
-    var x=padL+(s-1)*sw;
-    var code=spotCode(s);
-    if(code){ ctx.fillStyle=colFill(code); ctx.fillRect(x+2,top+2,sw-4,ch-4); }
-    ctx.strokeStyle='#888'; ctx.lineWidth=1; ctx.strokeRect(x+2,top+2,sw-4,ch-4);
-    if(inTurn(s)){ ctx.strokeStyle='#c01515'; ctx.lineWidth=2; ctx.strokeRect(x+1,top+1,sw-2,ch-2); }
-    ctx.fillStyle='#111';
-    var lbl = code? (s+' '+code) : (''+s);
-    ctx.fillText(lbl, x+sw/2, top+ch/2);
-    ctx.fillStyle='#444'; ctx.font='11px Helvetica';
-    ctx.fillText(''+s, x+sw/2, H-10); ctx.font='bold 12px Helvetica';
-  }
-  ctx.fillStyle='#c01515'; ctx.font='11px Helvetica';
-  ctx.fillText('Doorway (Spots '+M.door_start+'-'+M.door_end+')', padL+(M.door_start-0.5)*sw, top-12);
-})();// ---- SIDE VIEW ----
-(function(){
-  var cv=document.getElementById('cSide'), ctx=cv.getContext('2d');
-  var W=cv.width, H=cv.height; ctx.clearRect(0,0,W,H);
-  var padL=10, padR=10, top=10, bot=24;
-  var usableW=W-padL-padR; var sw=usableW/SP; var ch=H-top-bot;
-  ctx.strokeStyle='#1f3b8c'; ctx.lineWidth=2; ctx.strokeRect(padL,top,usableW,ch);
-  var hatched = {}; (M.hatched_spots||[]).forEach(function(s){ hatched[s]=1; });
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  for(var s=1;s<=SP;s++){
-    var x=padL+(s-1)*sw;
-    var nt=tiersAt(s);
-    var code=spotCode(s);
-    var th = ch/(TI||4);
-    for(var t=0;t<nt;t++){
-      var y = top+ch - (t+1)*th;
-      ctx.fillStyle=colFill(code||'A'); ctx.fillRect(x+2,y+1,sw-4,th-2);
-      ctx.strokeStyle=colStroke(code||'A'); ctx.lineWidth=1; ctx.strokeRect(x+2,y+1,sw-4,th-2);
-      if(hatched[s]){ ctx.save(); ctx.beginPath(); ctx.rect(x+2,y+1,sw-4,th-2); ctx.clip();
-        ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.lineWidth=1;
-        for(var k=-th;k<sw;k+=7){ ctx.beginPath(); ctx.moveTo(x+k,y+th); ctx.lineTo(x+k+th,y); ctx.stroke(); } ctx.restore(); }
-      ctx.fillStyle='#111'; ctx.font='10px Helvetica';
-      var p=REP[s]; if(p) ctx.fillText(p, x+sw/2, y+th/2);
-    }
-    if(inTurn(s)){ ctx.strokeStyle='#c01515'; ctx.lineWidth=2; ctx.strokeRect(x+1,top+1,sw-2,ch-2); }
-    ctx.fillStyle='#444'; ctx.font='11px Helvetica';
-    ctx.fillText(''+s, x+sw/2, H-10);
-  }
-})();// ---- 3D VIEW ----
-(function(){
-  if(!DATA.three.enabled || !window.THREE){ return; }
-  var cv=document.getElementById('three');
-  var renderer=new THREE.WebGLRenderer({canvas:cv, antialias:true});
-  renderer.setSize(cv.clientWidth||560, cv.clientHeight||300, false);
-  renderer.setClearColor(0xffffff,1);
-  var scene=new THREE.Scene();
-  var cam=new THREE.PerspectiveCamera(DATA.three.cam_fov||42,(cv.clientWidth||560)/(cv.clientHeight||300),0.1,1000);
-  var cp=DATA.three.cam_pos||[10,10,18];
-  cam.position.set(cp[0],cp[1],cp[2]); cam.lookAt(0,1,0);
-  scene.add(new THREE.AmbientLight(0xffffff, DATA.three.ambient_intensity||0.65));
-  var dl=new THREE.DirectionalLight(0xffffff, DATA.three.light_intensity||1.2); dl.position.set(8,14,10); scene.add(dl);
-  var CARLEN=SP, CARW=2.2, CARH=TI;
-  var carGeo=new THREE.BoxGeometry(CARLEN, CARH, CARW);
-  var carEdges=new THREE.EdgesGeometry(carGeo);
-  var car=new THREE.LineSegments(carEdges, new THREE.LineBasicMaterial({color:0x1f3b8c}));
-  car.position.set(0, CARH/2, 0); scene.add(car);
-  var grid=new THREE.GridHelper(40,40,0xdddddd,0xeeeeee); grid.position.y=0; scene.add(grid);
-  function hex(code){ var c=colFill(code); return parseInt(c.replace('#',''),16); }
-  CELLS.forEach(function(c){
-    var g=new THREE.BoxGeometry(0.92, 0.92, CARW*0.86);
-    var m=new THREE.MeshLambertMaterial({color:hex(c.code)});
-    var box=new THREE.Mesh(g,m);
-    var x = (c.spot-1) - (CARLEN/2) + 0.5;
-    var y = c.tier + 0.5;
-    box.position.set(x, y, 0); scene.add(box);
-    if(DATA.three.show_edges){ var e=new THREE.LineSegments(new THREE.EdgesGeometry(g), new THREE.LineBasicMaterial({color:0x111111})); e.position.copy(box.position); scene.add(e); }
+
+  var P = __PAYLOAD__;
+  var meta = P.meta || {};
+  var colors = P.colors || {};
+  var cells = P.cells || [];
+  var items = P.items || [];
+  var SPOTS = meta.spots || 15;
+  var TIERS = meta.tiers || 4;
+  var turn = meta.turn_spot || 0;
+  var blocked = meta.blocked_spot || 0;
+
+  function fmt(n){ try { return Math.round(n).toLocaleString('en-US'); } catch(e){ return ''+n; } }
+  function f2(n){ return (Math.round(n*100)/100).toFixed(2); }
+  function f1(n){ return (Math.round(n*10)/10).toFixed(1); }
+  function setTxt(id,v){ var el=document.getElementById(id); if(el) el.textContent=v; }
+  function colFor(code){ var c=colors[code]||colors['A']||{}; return {fill:c.fill||'#7fd4cf', stroke:c.stroke||'#2b8e88', text:c.text||'#06403d'}; }
+
+  setTxt('h_payload', fmt(meta.payload_lbs||0));
+  setTxt('h_maxpay', fmt(meta.max_payload_lbs||0));
+  setTxt('h_vol', Math.round(meta.volume_pct||0));
+  setTxt('h_wt', Math.round(meta.weight_pct||0));
+
+  var st = document.getElementById('tbl_settings');
+  var ini = (meta.car_id||'').match(/^[A-Za-z]+/);
+  var carno = (meta.car_id||'').replace(/^[A-Za-z]+/,'');
+  var setRows = [
+    ['Jurisdiction', '286 000'],
+    ['Securement', 'Plywood'],
+    ['Vehicle', '60 ft Plate F'],
+    ['Umler Initial', ini? ini[0] : '\u2014'],
+    ['Umler Car #', carno || '\u2014']
+  ];
+  setRows.forEach(function(r){
+    var tr=document.createElement('tr');
+    tr.innerHTML='<td class="k">'+r[0]+'</td><td>'+r[1]+'</td>';
+    st.appendChild(tr);
   });
-  function animate(){ requestAnimationFrame(animate); car.rotation.y+=0.0; renderer.render(scene,cam); }
-  animate();
+
+  setTxt('f_spots', meta.used_spots || SPOTS);
+  setTxt('f_cg', f2(meta.cg_in||0));
+  setTxt('f_airbag', f2(meta.airbag_in||0));
+  setTxt('f_wue', f1(meta.total_units||0));
+  setTxt('f_lisa', f1(meta.total_units||0));
+
+  // ---- Load Lines table (left, like the request grid) ----
+  var lt = document.getElementById('tbl_lines');
+  var hdr=document.createElement('tr');
+  hdr.innerHTML='<th>#</th><th>Description</th><th>Qty</th><th>Wt (Unit Wt.)</th>';
+  lt.appendChild(hdr);
+  items.forEach(function(it,i){
+    var tr=document.createElement('tr');
+    var tot = (it.wt? it.wt*it.qty : 0);
+    tr.innerHTML='<td>'+(i+1)+'</td>'+
+      '<td><b>Product: ['+it.id+']</b><br>'+(it.name||'')+'</td>'+
+      '<td>'+it.qty+'</td>'+
+      '<td><b>'+fmt(tot)+'</b><br>('+fmt(it.wt||0)+')</td>';
+    lt.appendChild(tr);
+  });
+
+  // ---- Item detail block (bottom) ----
+  var firstCode = (items[0]&&items[0].code)||'A';
+  var cd = colFor(firstCode);
+  var totalUnits = meta.total_units||0;
+  var it0 = items[0]||{};
+  var sz = (it0.L!=null&&it0.W!=null&&it0.H!=null) ? (f2(it0.L)+'x'+f2(it0.W)+'x'+f2(it0.H)) : '';
+  var itbl=document.getElementById('tbl_items');
+  function irow(k,v,swatch){
+    var tr=document.createElement('tr');
+    var vc = swatch ? '<td><span class="swatch" style="background:'+cd.fill+';border:1px solid '+cd.stroke+'"></span></td><td>'+v+'</td>' : '<td colspan="2">'+v+'</td>';
+    tr.innerHTML='<td class="k">'+k+'</td>'+vc;
+    itbl.appendChild(tr);
+  }
+  irow('ITEM ('+totalUnits+')', totalUnits, true);
+  irow('Name/SKU', it0.name||'');
+  irow('Product Id', it0.id||'');
+  irow('Size (LxWxH) (in)', sz);
+  irow('Weight (lb)', fmt(it0.wt||0));
+
+  // ---- legend ----
+  var lg=document.getElementById('legend');
+  lg.innerHTML =
+    '<div class="lg"><span class="swatch" style="background:repeating-linear-gradient(45deg,#1f7a1f 0 2px,#fff 2px 5px);border:1px solid #1f7a1f"></span> Diagonally hatched Loads must be restrained from sliding</div>'+
+    '<div class="lg"><span class="swatch" style="background:repeating-linear-gradient(90deg,#1f7a1f 0 2px,#fff 2px 5px);border:1px solid #1f7a1f"></span> Vertically hatched Loads must be restrained from tipping and sliding</div>'+
+    '<div class="lg">Any securement system used must prevent movement of all Loads blocked by the hatched Load</div>';
+  var sd=document.getElementById('sw_diag'); if(sd){ sd.style.background='repeating-linear-gradient(45deg,#888 0 2px,#fff 2px 5px)'; sd.style.border='1px solid #888'; }
+  var sv=document.getElementById('sw_vert'); if(sv){ sv.style.background='repeating-linear-gradient(90deg,#888 0 2px,#fff 2px 5px)'; sv.style.border='1px solid #888'; }
+
+  // grid[spot][tier] = {pid,code} ; spot 1..SPOTS, tier 0..TIERS-1 (0=bottom)
+  var grid = {};
+  for (var sp=1; sp<=SPOTS; sp++){ grid[sp]=[]; for(var t=0;t<TIERS;t++) grid[sp][t]=null; }
+  cells.forEach(function(c){ if(grid[c.spot]) grid[c.spot][c.tier]={pid:c.pid, code:c.code}; });
+
+  // turn spots: the two doorway spots that hold rotated units (turn and turn-? ).
+  // Reference shows rotated 'r' units occupying the turn column (spot==turn) and its neighbor blocked spot.
+  function isTurnSpot(sp){ return sp===turn; }
+
+  // Sequential numbering left->right. For each spot left->right, number tiers bottom->top.
+  // Assign n=1.. across all occupied cells. Turn-spot units get 'r' suffix.
+  var seq = 1;
+  var labels = {}; // labels[sp][t] = {n, code, rot}
+  for (var sp=1; sp<=SPOTS; sp++){
+    labels[sp]=[];
+    for (var t=0;t<TIERS;t++){
+      var g=grid[sp][t];
+      if(!g){ labels[sp][t]=null; continue; }
+      var rot = isTurnSpot(sp);
+      labels[sp][t]={ n:seq, code:g.code, rot:rot };
+      seq++;
+    }
+  }
+
+  function topLabel(sp,t){ var l=labels[sp]&&labels[sp][t]; if(!l) return null; return l.n + (l.rot?'r':'') + ' ' + l.code; }
+
+  function drawTop(){
+    var cv=document.getElementById('cvTop'); if(!cv) return;
+    var W=cv.width, H=cv.height; var ctx=cv.getContext('2d');
+    ctx.clearRect(0,0,W,H);
+    var padL=10, padR=10, padT=20, padB=14;
+    var innerW=W-padL-padR, innerH=H-padT-padB;
+    var colW=innerW/SPOTS;
+    // outline of car bed
+    ctx.strokeStyle='#333'; ctx.lineWidth=1.5; ctx.strokeRect(padL,padT,innerW,innerH);
+    for(var sp=1; sp<=SPOTS; sp++){
+      var x=padL+(sp-1)*colW;
+      // top view shows the top tier representative for normal spots
+      var topT=TIERS-1;
+      // find topmost occupied tier
+      var occT=-1; for(var t=TIERS-1;t>=0;t--){ if(labels[sp]&&labels[sp][t]){ occT=t; break; } }
+      if(occT<0){ continue; }
+      if(isTurnSpot(sp)){
+        // draw two stacked rotated cells (top tier and one below) within this column
+        var rows=[]; for(var t=TIERS-1;t>=0;t--){ if(labels[sp][t]) rows.push(t); }
+        var show = rows.slice(0,2); // top two for display
+        var ch=innerH/2;
+        show.forEach(function(t,ix){
+          var y=padT+ix*ch;
+          var c=colFor(labels[sp][t].code);
+          ctx.fillStyle=c.fill; ctx.fillRect(x+1,y+1,colW-2,ch-2);
+          ctx.strokeStyle='#cc2222'; ctx.lineWidth=1.4; ctx.strokeRect(x+1,y+1,colW-2,ch-2);
+          ctx.fillStyle=c.text; ctx.font='bold 12px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+          ctx.fillText(topLabel(sp,t), x+colW/2, y+ch/2);
+        });
+      } else {
+        var c=colFor(labels[sp][occT].code);
+        ctx.fillStyle=c.fill; ctx.fillRect(x+1,padT+1,colW-2,innerH-2);
+        ctx.strokeStyle=c.stroke; ctx.lineWidth=1; ctx.strokeRect(x+1,padT+1,colW-2,innerH-2);
+        // vertical text
+        ctx.save();
+        ctx.translate(x+colW/2, padT+innerH/2);
+        ctx.rotate(-Math.PI/2);
+        ctx.fillStyle=c.text; ctx.font='bold 13px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(topLabel(sp,occT), 0, 0);
+        ctx.restore();
+      }
+    }
+  }
+
+  function sideLabel(sp,t){ var l=labels[sp]&&labels[sp][t]; if(!l) return null; return l.n + (l.rot?'r':'') + ' ' + l.code; }
+
+  function drawSide(){
+    var cv=document.getElementById('cvSide'); if(!cv) return;
+    var W=cv.width, H=cv.height; var ctx=cv.getContext('2d');
+    ctx.clearRect(0,0,W,H);
+    var padL=10, padR=10, padT=8, padB=34;
+    var innerW=W-padL-padR, innerH=H-padT-padB;
+    var colW=innerW/SPOTS;
+    var rowH=innerH/TIERS;
+    for(var sp=1; sp<=SPOTS; sp++){
+      var x=padL+(sp-1)*colW;
+      if(isTurnSpot(sp)){
+        // rotated turn block: one merged tall cell per visible row, red outline
+        for(var t=0;t<TIERS;t++){
+          var l=labels[sp][t]; if(!l) continue;
+          var y=padT+(TIERS-1-t)*rowH;
+          var c=colFor(l.code);
+          ctx.fillStyle=c.fill; ctx.fillRect(x+1,y+1,colW-2,rowH-2);
+          ctx.strokeStyle='#cc2222'; ctx.lineWidth=1.6; ctx.strokeRect(x+1,y+1,colW-2,rowH-2);
+          ctx.fillStyle=c.text; ctx.font='bold 12px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+          ctx.fillText(sideLabel(sp,t), x+colW/2, y+rowH/2);
+        }
+        continue;
+      }
+      for(var t=0;t<TIERS;t++){
+        var l=labels[sp][t]; if(!l) continue;
+        var y=padT+(TIERS-1-t)*rowH;
+        var c=colFor(l.code);
+        ctx.fillStyle=c.fill; ctx.fillRect(x+1,y+1,colW-2,rowH-2);
+        ctx.strokeStyle=c.stroke; ctx.lineWidth=1; ctx.strokeRect(x+1,y+1,colW-2,rowH-2);
+        ctx.fillStyle=c.text; ctx.font='11px Arial'; ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(sideLabel(sp,t), x+colW/2, y+rowH/2);
+      }
+    }
+    // baseline + wheels
+    ctx.strokeStyle='#333'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(padL,padT+innerH); ctx.lineTo(padL+innerW,padT+innerH); ctx.stroke();
+    var wy=padT+innerH+14;
+    [0.07,0.13,0.19, 0.81,0.87,0.93].forEach(function(fx){
+      var wx=padL+innerW*fx;
+      ctx.fillStyle='#555'; ctx.beginPath(); ctx.arc(wx,wy,9,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#999'; ctx.beginPath(); ctx.arc(wx,wy,3,0,Math.PI*2); ctx.fill();
+    });
+  }
+
+  drawTop(); drawSide();
+
+  function draw3D(){
+    var host=document.getElementById('three'); if(!host || !window.THREE) return;
+    var w=host.clientWidth||500, h=host.clientHeight||300;
+    var scene=new THREE.Scene(); scene.background=new THREE.Color(0xffffff);
+    var cam=new THREE.PerspectiveCamera(45, w/h, 0.1, 5000);
+    var renderer=new THREE.WebGLRenderer({antialias:true});
+    renderer.setSize(w,h); host.appendChild(renderer.domElement);
+    scene.add(new THREE.AmbientLight(0xffffff,0.75));
+    var dl=new THREE.DirectionalLight(0xffffff,0.7); dl.position.set(1,2,1); scene.add(dl);
+
+    var uW=2.0, uH=1.0, uD=3.0, gap=0.12;
+    var group=new THREE.Group();
+    var col = colFor((items[0]&&items[0].code)||'A');
+    var matFill=new THREE.MeshLambertMaterial({color:new THREE.Color(col.fill)});
+    var totalLen = SPOTS*(uW+gap);
+    for(var sp=1; sp<=SPOTS; sp++){
+      var px = (sp-1)*(uW+gap) - totalLen/2;
+      for(var t=0;t<TIERS;t++){
+        if(!(labels[sp]&&labels[sp][t])) continue;
+        var rot = labels[sp][t].rot;
+        var geo = rot ? new THREE.BoxGeometry(uD*0.6,uH,uW) : new THREE.BoxGeometry(uW,uH,uD);
+        var mesh=new THREE.Mesh(geo,matFill);
+        mesh.position.set(px, t*(uH+0.05)+uH/2, 0);
+        group.add(mesh);
+        var edges=new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({color:0x2b8e88}));
+        edges.position.copy(mesh.position); group.add(edges);
+      }
+    }
+    scene.add(group);
+    cam.position.set(totalLen*0.55, TIERS*1.6, totalLen*0.75);
+    cam.lookAt(0, TIERS*0.5, 0);
+    function animate(){ requestAnimationFrame(animate); renderer.render(scene,cam); }
+    animate();
+  }
+  if(window.THREE){ draw3D(); } else { window.addEventListener('load', draw3D); }
+
 })();
 </script>
+
 </body>
 </html>
 """
 
     html = HTML.replace("__PAYLOAD__", payload_json)
     components.html(html, height=height_px, scrolling=True)
+
 
 
 
