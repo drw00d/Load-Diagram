@@ -18,8 +18,12 @@
 from __future__ import annotations
 
 import json
+import base64
+import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -1089,6 +1093,19 @@ BP_SECUREMENTS = ["Standard BP Securement", "GrantLoading", "Airbag + Strap", "D
 BP_JURISDICTIONS = ["US Rail", "US Highway", "Canada Rail", "Southeast Region", "West Region"]
 BP_DATA_SOURCES = ["MES Live", "Planning Sandbox", "Archived Loads"]
 BP_HISTORY = ["Today", "Last 7 days", "Last 30 days", "All history"]
+REFERENCE_ROOT_ENV = "RAIL_DIAGRAM_REFERENCE_DIR"
+DEFAULT_REFERENCE_ROOT = os.environ.get(
+    REFERENCE_ROOT_ENV,
+    r"C:\Users\mgwoo\OneDrive\Desktop\Rail Diagrams",
+)
+REFERENCE_PAGE_SEQUENCE = [
+    "Three Dimensional View",
+    "Two Dimensional View",
+    "Top + Side 1 View",
+    "Top + Side 2 View",
+]
+REFERENCE_SKIP_DIRS = {".claude", "loadxpert"}
+REFERENCE_EMBED_LIMIT_BYTES = 8_000_000
 
 
 def apply_loadxpert_theme() -> None:
@@ -1103,7 +1120,7 @@ def apply_loadxpert_theme() -> None:
         [data-testid="stSidebar"] .stNumberInput label,
         [data-testid="stSidebar"] .stCheckbox label {color: #f4f7fb;}
         .lx-topbar {
-            background: #202a33;
+            background: #1a2a4a;
             color: #fff;
             padding: 14px 18px;
             border-radius: 8px;
@@ -1113,7 +1130,8 @@ def apply_loadxpert_theme() -> None:
             gap: 16px;
             margin-bottom: 16px;
         }
-        .lx-brand {font-size: 21px; font-weight: 700; letter-spacing: 0;}
+        .lx-brand {font-size: 21px; font-weight: 800; letter-spacing: .4px;}
+        .lx-brand .x {color: #d92121;}
         .lx-subtle {font-size: 12px; color: #b8c2cc;}
         .lx-pill {
             display: inline-flex;
@@ -1160,6 +1178,33 @@ def apply_loadxpert_theme() -> None:
             min-height: 130px;
         }
         .lx-scenario.accepted {border-color: #2f9e58; background: #f2fbf5;}
+        .lx-ref-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+            background: #fff;
+            border: 1px solid #dde2ea;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .lx-ref-table th {
+            background: #1a2a4a;
+            color: #fff;
+            padding: 8px 10px;
+            text-align: left;
+        }
+        .lx-ref-table td {
+            border-top: 1px solid #edf0f4;
+            padding: 7px 10px;
+            vertical-align: top;
+        }
+        .lx-pdf-preview {
+            width: 100%;
+            height: 760px;
+            border: 1px solid #ccd2db;
+            border-radius: 6px;
+            background: #fff;
+        }
         @media (max-width: 900px) {
             .lx-topbar {display: block;}
             .lx-meta-grid {grid-template-columns: repeat(2, minmax(120px, 1fr));}
@@ -1175,8 +1220,8 @@ def render_topbar(page_label: str) -> None:
         f"""
         <div class="lx-topbar">
           <div>
-            <div class="lx-brand">LoadXpert Building Products</div>
-            <div class="lx-subtle">Planning board, optimization, securement, load-plan imaging, and dunnage workflow</div>
+            <div class="lx-brand">WOOD<span class="x">X</span>PERT Building Products</div>
+            <div class="lx-subtle">Planning board, optimization, reference diagrams, securement, load-plan imaging, and dunnage workflow</div>
           </div>
           <div>
             <span class="lx-pill green">GPBP</span>
@@ -1301,6 +1346,8 @@ def ensure_replica_state(pm: pd.DataFrame) -> None:
         st.session_state.bp_orders = build_demo_orders(pm)
     if "bp_workspace" not in st.session_state:
         st.session_state.bp_workspace = "Planning Board"
+    if "bp_reference_root" not in st.session_state:
+        st.session_state.bp_reference_root = DEFAULT_REFERENCE_ROOT
     if "bp_current_order_id" not in st.session_state and st.session_state.bp_orders:
         st.session_state.bp_current_order_id = st.session_state.bp_orders[0]["id"]
     if "bp_search" not in st.session_state:
@@ -1517,9 +1564,20 @@ def clean_securement_text(text: str) -> str:
     return value
 
 
+def html_escape(value: Any) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
 def render_meta_grid(items: List[Tuple[str, str]]) -> None:
     cells = "".join(
-        f'<div class="lx-meta"><div class="label">{label}</div><div class="value">{value}</div></div>'
+        f'<div class="lx-meta"><div class="label">{html_escape(label)}</div><div class="value">{html_escape(value)}</div></div>'
         for label, value in items
     )
     st.markdown(f'<div class="lx-meta-grid">{cells}</div>', unsafe_allow_html=True)
@@ -1535,6 +1593,190 @@ def render_rule_metrics(analysis: AnalysisResult) -> None:
         st.metric("CG above TOR", f"{analysis.cg_above_tor_in:.2f} in", analysis.cg_status)
     with c4:
         st.metric("Weight balance", f"{analysis.weight_balance_ratio * 100:.1f}%")
+
+
+def format_bytes(num_bytes: int) -> str:
+    value = float(num_bytes or 0)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def scan_reference_library(root_text: str) -> Dict[str, Any]:
+    root = Path(root_text).expanduser()
+    info: Dict[str, Any] = {
+        "root": str(root),
+        "exists": root.exists() and root.is_dir(),
+        "mills": [],
+        "root_docs": [],
+        "pdf_count": 0,
+        "loadxpert_files": [],
+        "error": "",
+    }
+    if not info["exists"]:
+        info["error"] = "Reference folder was not found."
+        return info
+
+    try:
+        all_pdfs = list(root.rglob("*.pdf"))
+        info["pdf_count"] = len(all_pdfs)
+        for folder in sorted([p for p in root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+            if folder.name.lower() in REFERENCE_SKIP_DIRS:
+                continue
+            pdfs = list(folder.glob("*.pdf"))
+            if not pdfs:
+                continue
+            latest = max((p.stat().st_mtime for p in pdfs), default=folder.stat().st_mtime)
+            info["mills"].append(
+                {
+                    "name": folder.name,
+                    "pdf_count": len(pdfs),
+                    "latest": datetime.fromtimestamp(latest).strftime("%Y-%m-%d %H:%M"),
+                }
+            )
+
+        for doc in sorted([p for p in root.iterdir() if p.is_file()], key=lambda p: p.name.lower()):
+            info["root_docs"].append(
+                {
+                    "name": doc.name,
+                    "extension": doc.suffix.lower() or "(none)",
+                    "size": doc.stat().st_size,
+                    "modified": datetime.fromtimestamp(doc.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                    "path": str(doc),
+                }
+            )
+
+        lx_dir = root / "loadxpert"
+        if lx_dir.exists():
+            for file in sorted([p for p in lx_dir.rglob("*") if p.is_file()], key=lambda p: str(p).lower()):
+                info["loadxpert_files"].append(
+                    {
+                        "name": file.name,
+                        "relative": str(file.relative_to(lx_dir)),
+                        "size": file.stat().st_size,
+                        "modified": datetime.fromtimestamp(file.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                    }
+                )
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def list_reference_pdfs(root_text: str, mill_name: str) -> List[Dict[str, Any]]:
+    root = Path(root_text).expanduser()
+    folder = root if mill_name == "(root)" else root / mill_name
+    if not folder.exists() or not folder.is_dir():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for pdf in sorted(folder.glob("*.pdf"), key=lambda p: p.name.lower()):
+        stat = pdf.stat()
+        rows.append(
+            {
+                "name": pdf.name,
+                "order": pdf.stem,
+                "size": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "path": str(pdf),
+            }
+        )
+    return rows
+
+
+def value_after_label(lines: List[str], label: str) -> str:
+    label_norm = label.lower()
+    for idx, line in enumerate(lines):
+        clean_line = line.strip()
+        if clean_line.lower() == label_norm and idx + 1 < len(lines):
+            return lines[idx + 1].strip()
+        if clean_line.lower().startswith(label_norm):
+            value = clean_line[len(label) :].strip(" :-|")
+            if value:
+                return value
+    return ""
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def extract_pdf_reference_metadata(path_text: str) -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "path": path_text,
+        "page_count": 0,
+        "page_titles": [],
+        "fields": {},
+        "error": "",
+    }
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        info["error"] = "Install pypdf to extract PDF text metadata."
+        return info
+
+    try:
+        reader = PdfReader(path_text)
+        info["page_count"] = len(reader.pages)
+        fields: Dict[str, str] = {}
+        page_titles: List[str] = []
+        for page in reader.pages[:4]:
+            text = page.extract_text() or ""
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            title = next((line for line in lines if "View" in line), "")
+            if title:
+                page_titles.append(title)
+            for label in ["Created By", "Created At", "Order Number", "Vehicle Number", "PO Number"]:
+                value = value_after_label(lines, label)
+                if value and label not in fields:
+                    fields[label] = value
+        info["page_titles"] = page_titles
+        info["fields"] = fields
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
+
+
+def apply_reference_metadata_to_order(
+    order: Dict[str, Any],
+    *,
+    mill_name: str,
+    pdf_path: str,
+    metadata: Dict[str, Any],
+) -> None:
+    fields = metadata.get("fields", {})
+    order["referenceMill"] = mill_name
+    order["referencePdf"] = Path(pdf_path).name
+    order["referencePdfPath"] = pdf_path
+    order["referenceCreatedBy"] = fields.get("Created By", "")
+    order["referenceCreatedAt"] = fields.get("Created At", "")
+    order["referenceOrderNumber"] = fields.get("Order Number", "")
+    order["referenceVehicleNumber"] = fields.get("Vehicle Number", "")
+    order["referencePoNumber"] = fields.get("PO Number", "")
+
+    vehicle = fields.get("Vehicle Number", "")
+    match = re.search(r"UML_([A-Za-z]+)-0*([0-9]+)", vehicle)
+    if match:
+        order["umlerInitial"] = match.group(1)
+        order["umlerCarNumber"] = match.group(2)
+
+
+def render_reference_pdf_preview(path_text: str) -> None:
+    path = Path(path_text)
+    data = path.read_bytes()
+    st.download_button(
+        "Download Reference PDF",
+        data=data,
+        file_name=path.name,
+        mime="application/pdf",
+    )
+    if len(data) > REFERENCE_EMBED_LIMIT_BYTES:
+        st.info(f"{path.name} is {format_bytes(len(data))}; use the download button to inspect it.")
+        return
+    encoded = base64.b64encode(data).decode("ascii")
+    st.markdown(
+        f'<iframe class="lx-pdf-preview" src="data:application/pdf;base64,{encoded}"></iframe>',
+        unsafe_allow_html=True,
+    )
 
 
 
@@ -1558,7 +1800,7 @@ with st.sidebar:
     st.header("LoadXpert")
     workspace = st.radio(
         "Workspace",
-        ["Planning Board", "Order Details", "Load Plan View", "Dunnage & Annotations"],
+        ["Planning Board", "Order Details", "Load Plan View", "Reference Diagrams", "Dunnage & Annotations"],
         key="bp_workspace",
         label_visibility="collapsed",
     )
@@ -1627,6 +1869,7 @@ render_topbar(workspace)
 
 orders = st.session_state.bp_orders
 filtered_orders = orders if mode_selected == "All Modes" else [o for o in orders if o["mode"] == mode_selected]
+reference_info = scan_reference_library(st.session_state.bp_reference_root)
 
 if st.session_state.bp_last_message:
     st.success(st.session_state.bp_last_message)
@@ -1637,6 +1880,7 @@ render_meta_grid(
         ("Source", data_source_selected),
         ("History", history_selected),
         ("Active Orders", str(len(filtered_orders))),
+        ("Reference PDFs", f"{reference_info.get('pdf_count', 0):,}"),
     ]
 )
 
@@ -1950,7 +2194,8 @@ elif workspace == "Load Plan View":
         render_meta_grid(
             [
                 ("Vehicle", order["vehicleName"]),
-                ("Reference", order["requestId"]),
+                ("Reference", order.get("referencePdf", order["requestId"])),
+                ("Mill", order.get("referenceMill", "Demo")),
                 ("Payload", f"{analysis.payload_lbs:,.0f} lbs"),
                 ("Securement", clean_securement_text(analysis.securement.strap_text)),
             ]
@@ -1969,11 +2214,11 @@ elif workspace == "Load Plan View":
 
         render_routeA_component(
             page_title="Top + Side View (Building Products)",
-            created_by="LoadXpert Replica",
-            created_at=order.get("optimizedAt", datetime.now().strftime("%Y-%m-%d %H:%M")),
-            order_number=order["orderId"],
-            vehicle_number=order["vehicleName"],
-            po_number=order["batchId"],
+            created_by=order.get("referenceCreatedBy") or "LoadXpert Replica",
+            created_at=order.get("referenceCreatedAt") or order.get("optimizedAt", datetime.now().strftime("%Y-%m-%d %H:%M")),
+            order_number=order.get("referenceOrderNumber") or order["orderId"],
+            vehicle_number=order.get("referenceVehicleNumber") or order["vehicleName"],
+            po_number=order.get("referencePoNumber") or order["batchId"],
             car_id=(order.get("umlerInitial", "") + order.get("umlerCarNumber", "")).strip() or "UNASSIGNED",
             matrix=order["matrix"],
             products=products,
@@ -2016,6 +2261,141 @@ elif workspace == "Load Plan View":
             mime="text/csv",
         )
         st.dataframe(cargo_df, width="stretch", hide_index=True)
+
+elif workspace == "Reference Diagrams":
+    st.markdown('<div class="lx-section-title">Rail Diagram Reference Library</div>', unsafe_allow_html=True)
+    st.caption("Uses the local mill folders and LoadXpert reference artifacts on this machine.")
+
+    ref_a, ref_b = st.columns([3, 1], vertical_alignment="bottom")
+    with ref_a:
+        root_text = st.text_input("Reference folder", value=st.session_state.bp_reference_root)
+    with ref_b:
+        if st.button("Rescan", width="stretch"):
+            scan_reference_library.clear()
+            list_reference_pdfs.clear()
+            extract_pdf_reference_metadata.clear()
+            st.session_state.bp_last_message = "Reference library cache cleared."
+            st.rerun()
+
+    if root_text != st.session_state.bp_reference_root:
+        st.session_state.bp_reference_root = root_text
+    reference_info = scan_reference_library(root_text)
+
+    if not reference_info.get("exists"):
+        st.warning(reference_info.get("error") or "Reference folder was not found.")
+        st.stop()
+
+    mills = reference_info.get("mills", [])
+    render_meta_grid(
+        [
+            ("Reference Root", reference_info["root"]),
+            ("Mill Folders", str(len(mills))),
+            ("PDF Diagrams", f"{reference_info.get('pdf_count', 0):,}"),
+            ("LoadXpert App Files", str(len(reference_info.get("loadxpert_files", [])))),
+        ]
+    )
+
+    with st.expander("Mill folder counts", expanded=False):
+        if mills:
+            st.dataframe(pd.DataFrame(mills), width="stretch", hide_index=True)
+        else:
+            st.info("No mill PDF folders found under the reference root.")
+
+    if not mills:
+        st.stop()
+
+    default_mill_idx = next((i for i, row in enumerate(mills) if row["name"] == "Dudley"), 0)
+    selected_mill = st.selectbox("Mill folder", [row["name"] for row in mills], index=default_mill_idx)
+    pdf_rows = list_reference_pdfs(root_text, selected_mill)
+
+    if not pdf_rows:
+        st.info("No PDFs found in this mill folder.")
+        st.stop()
+
+    pdf_table = pd.DataFrame(pdf_rows)
+    pdf_table["size"] = pdf_table["size"].map(format_bytes)
+    st.dataframe(pdf_table[["order", "name", "size", "modified"]], width="stretch", hide_index=True, height=260)
+
+    selected_pdf_name = st.selectbox("Example diagram PDF", [row["name"] for row in pdf_rows])
+    selected_pdf = next(row for row in pdf_rows if row["name"] == selected_pdf_name)
+    pdf_metadata = extract_pdf_reference_metadata(selected_pdf["path"])
+
+    if pdf_metadata.get("error"):
+        st.warning(pdf_metadata["error"])
+
+    fields = pdf_metadata.get("fields", {})
+    page_titles = pdf_metadata.get("page_titles") or REFERENCE_PAGE_SEQUENCE
+    render_meta_grid(
+        [
+            ("Created By", fields.get("Created By", "-")),
+            ("Created At", fields.get("Created At", "-")),
+            ("Order Number", fields.get("Order Number", selected_pdf["order"])),
+            ("Vehicle Number", fields.get("Vehicle Number", "-")),
+            ("PO Number", fields.get("PO Number", "-")),
+            ("Pages", str(pdf_metadata.get("page_count", 0) or "-")),
+        ]
+    )
+
+    st.markdown('<div class="lx-section-title">Detected Page Sequence</div>', unsafe_allow_html=True)
+    page_df = pd.DataFrame(
+        {
+            "Page": list(range(1, len(page_titles) + 1)),
+            "Title": page_titles,
+            "Reference Pattern": [
+                "Expected" if idx < len(REFERENCE_PAGE_SEQUENCE) and title == REFERENCE_PAGE_SEQUENCE[idx] else "Observed"
+                for idx, title in enumerate(page_titles)
+            ],
+        }
+    )
+    st.dataframe(page_df, width="stretch", hide_index=True)
+
+    order = current_order()
+    ref_action_a, ref_action_b, ref_action_c = st.columns([1.2, 1.2, 2], vertical_alignment="center")
+    with ref_action_a:
+        if st.button("Use Metadata On Current Order", type="primary", width="stretch", disabled=not order):
+            apply_reference_metadata_to_order(
+                order,
+                mill_name=selected_mill,
+                pdf_path=selected_pdf["path"],
+                metadata=pdf_metadata,
+            )
+            st.session_state.bp_last_message = f"Applied {selected_pdf_name} reference metadata to {order['orderId']}."
+            st.rerun()
+    with ref_action_b:
+        if st.button("Open Load Plan With Reference", width="stretch", disabled=not order):
+            apply_reference_metadata_to_order(
+                order,
+                mill_name=selected_mill,
+                pdf_path=selected_pdf["path"],
+                metadata=pdf_metadata,
+            )
+            st.session_state.bp_workspace_pending = "Load Plan View"
+            st.session_state.bp_last_message = f"Load plan header now follows {selected_pdf_name}."
+            st.rerun()
+    with ref_action_c:
+        st.caption("The selected PDF metadata feeds Created By, Created At, Order Number, Vehicle Number, PO Number, mill, and reference filename.")
+
+    with st.expander("Root rule/workbook artifacts", expanded=False):
+        root_docs = reference_info.get("root_docs", [])
+        if root_docs:
+            docs_df = pd.DataFrame(root_docs)
+            docs_df["size"] = docs_df["size"].map(format_bytes)
+            st.dataframe(docs_df[["name", "extension", "size", "modified", "path"]], width="stretch", hide_index=True)
+        else:
+            st.info("No root-level reference artifacts found.")
+
+    with st.expander("Local LoadXpert reference app files", expanded=False):
+        lx_files = reference_info.get("loadxpert_files", [])
+        if lx_files:
+            lx_df = pd.DataFrame(lx_files)
+            lx_df["size"] = lx_df["size"].map(format_bytes)
+            st.dataframe(lx_df[["relative", "size", "modified"]], width="stretch", hide_index=True)
+            st.info("Reference traits detected: navy WOODXPERT header, filter bar, KPI cards, sticky order grid, four-page diagram output, and AAR hatching legend.")
+        else:
+            st.info("No local loadxpert reference app was found under this root.")
+
+    st.markdown('<div class="lx-section-title">PDF Preview</div>', unsafe_allow_html=True)
+    render_reference_pdf_preview(selected_pdf["path"])
 
 else:
     st.markdown('<div class="lx-section-title">Dunnage Manager</div>', unsafe_allow_html=True)
